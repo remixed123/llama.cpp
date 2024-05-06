@@ -201,8 +201,8 @@ ifdef LLAMA_SCHED_MAX_COPIES
 endif
 
 ifdef LLAMA_DEBUG
-	MK_CFLAGS   += -O0 -g
-	MK_CXXFLAGS += -O0 -g
+	MK_CFLAGS   += -O0 -g -fsanitize=address
+	MK_CXXFLAGS += -O0 -g -fsanitize=address
 	MK_LDFLAGS  += -g
 
 	ifeq ($(UNAME_S),Linux)
@@ -413,6 +413,11 @@ endif # LLAMA_OPENBLAS
 ifndef LLAMA_NO_LLAMAFILE
 	MK_CPPFLAGS += -DGGML_USE_LLAMAFILE
 	OBJS        += sgemm.o
+endif
+
+ifndef LLAMA_NO_AMX
+	MK_CPPFLAGS += -DGGML_USE_AMX
+	OBJS        += ggml-amx.o
 endif
 
 ifdef LLAMA_BLIS
@@ -630,6 +635,11 @@ endif # LLAMA_METAL
 ifndef LLAMA_NO_LLAMAFILE
 sgemm.o: sgemm.cpp sgemm.h ggml.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+endif
+
+ifndef LLAMA_NO_AMX
+ggml-amx.o: ggml-amx.cpp ggml-amx.h ggml.h
+    $(CXX) $(CXXFLAGS) -c $< -o $@
 endif
 
 GF_CC := $(CC)

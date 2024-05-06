@@ -36,8 +36,16 @@
 #undef GGML_USE_LLAMAFILE
 #endif
 
+#ifndef __AMX_INT8__
+#undef GGML_USE_AMX
+#endif
+
 #ifdef GGML_USE_LLAMAFILE
 #include "sgemm.h"
+#endif
+
+#ifdef GGML_USE_AMX
+#include "ggml-amx.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -317,6 +325,11 @@ static ggml_fp16_t ggml_table_gelu_quick_f16[1 << 16];
 
 // precomputed f32 table for f16 (256 KB) (ggml-impl.h)
 float ggml_table_f32_f16[1 << 16];
+
+#if GGML_USE_AMX
+// global flag for amx init
+static bool ggml_amx_initialized = false;
+#endif
 
 GGML_CALL const char * ggml_status_to_string(enum ggml_status status) {
     switch (status) {
@@ -3371,6 +3384,10 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
 
 #if defined(GGML_USE_CLBLAST)
         ggml_cl_init();
+#endif
+
+#if GGML_USE_AMX
+        ggml_amx_initialized = ggml_amx_init();
 #endif
 
         ggml_setup_op_has_task_pass();
@@ -12441,12 +12458,45 @@ static void ggml_compute_forward_mul_mat(
     // nb01 >= nb00 - src0 is not transposed
     //   compute by src0 rows
 
+    if (params->type == GGML_TASK_TYPE_INIT) {
+        printf("\n### GGML_TASK_TYPE_INIT\n");
+    } else if (params->type == GGML_TASK_TYPE_COMPUTE) {
+        printf("\n### GGML_TASK_TYPE_COMPUTE\n");
+    } else if (params->type == GGML_TASK_TYPE_FINALIZE) {
+        printf("\n### GGML_TASK_TYPE_FINALIZE\n");
+    }
+
 #if defined(GGML_USE_CLBLAST)
     if (ggml_cl_can_mul_mat(src0, src1, dst)) {
         if (params->ith == 0 && params->type == GGML_TASK_TYPE_COMPUTE) {
             ggml_cl_mul_mat(src0, src1, dst, params->wdata, params->wsize);
         }
         return;
+    }
+#endif
+
+#if GGML_USE_AMX
+    float* dst_copy = (float*)malloc(ne1 * ne0 * sizeof(float));
+    if (ggml_compute_forward_mul_mat_use_amx(dst) && ggml_amx_initialized) {
+
+        ggml_mul_mat_amx(params, dst);
+        //printf("\n### amx result: \n");
+        //print_C((float*)(dst->data), ne1, ne0);
+        //print_C((float*)(dst->data), 48, 16);
+        sleep(1);
+        if (ith == 0) {
+            //printf("\n### amx result: \n");
+            //print_C((float*)(dst->data), ne1, ne0);
+            float* dst_ptr = (float*)(dst->data);
+            for (int m = 0; m < ne1; m++) {
+                for (int n = 0; n < ne0; n++) {
+                    dst_copy[m * ne0 + n] = dst_ptr[m * ne0 + n];
+                    dst_ptr[m * ne0 + n] = 0;
+                }
+            }
+        }
+        sleep(1);
+        //return;
     }
 #endif
 
