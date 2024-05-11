@@ -3,6 +3,8 @@
 #include "ggml-amx.h"
 #include "ggml-impl.h"
 #include "ggml-quants.h"
+#include <algorithm>
+#include <type_traits>
 
 #if defined(__gnu_linux__)
 #include <sys/syscall.h>
@@ -15,8 +17,13 @@
 #define RESTRICT __restrict__
 #endif
 
-
-#include <iostream>
+#if (defined(_WIN32) || defined(_WIN64))
+#define ALWAYS_INLINE __forceinline
+#elif __has_attribute(always_inline) || defined(__GNUC__)
+#define ALWAYS_INLINE __attribute__((__always_inline__)) inline
+#else
+#define ALWAYS_INLINE inline
+#endif
 
 #if defined(__AMX_INT8__)
 
@@ -54,6 +61,24 @@ static void balance211(T n, T nth, T ith, T& n_start, T& n_end) {
   }
   n_end += n_start;
 }
+
+// Forced unrolling
+template <int n>
+struct Unroll {
+  template <typename Func, typename... Args>
+  ALWAYS_INLINE void operator()(const Func& f, Args... args) const {
+    Unroll<n - 1>{}(f, args...);
+    f(std::integral_constant<int, n - 1>{}, args...);
+  }
+};
+
+template <>
+struct Unroll<1> {
+  template <typename Func, typename... Args>
+  ALWAYS_INLINE void operator()(const Func& f, Args... args) const {
+    f(std::integral_constant<int, 0>{}, args...);
+  }
+};
 
 //
 template <typename T>
@@ -205,19 +230,6 @@ inline void transpose_8x8_32bit(__m256i * v, __m256i * v1) {
   v1[7] = _mm256_permute2f128_si256(v[7], v[5], 0x13);
 }
 
-static void print_512i(const __m512i _x)
-{
-    __attribute__((aligned(32)))
-    uint8_t a[64];
-    _mm512_store_si512(a, _x);
-
-    for (int i = 0; i < 64; i++)
-    {
-        printf("%3d ", a[i]);
-    }
-    printf("\n");
-}
-
 template <typename TB>
 inline void pack_qs(void * RESTRICT packed_B, const TB * RESTRICT B, int KB) {
   int8_t tmp[8 * 64];
@@ -323,7 +335,20 @@ static void print_512(const __m512 _x)
 
     for (int i = 0; i < 16; i++)
     {
-        printf("%.3f ", a[i]);
+        printf("%.5f ", a[i]);
+    }
+    printf("\n");
+}
+
+static void print_512i(const __m512i _x)
+{
+    __attribute__((aligned(32)))
+    int32_t a[16];
+    _mm512_store_si512(a, _x);
+
+    for (int i = 0; i < 16; i++)
+    {
+        printf("%4d ", a[i]);
     }
     printf("\n");
 }
@@ -354,10 +379,10 @@ void acc_C<block_q8_1, block_q4_1>(float * RESTRICT C, int ldc, const int32_t * 
 // re-organize in the format {NB, KB, TILE_SIZE}:
 #define PACKED_INDEX(n, k, KB, tile_size) (n * KB + k) * tile_size
 
-template<typename TB, int BLCK_SIZE>
+template<typename TB, int BLOCK_K>
 void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, int N, int K) {
   const int NB = N / TILE_N;
-  const int KB = K / BLCK_SIZE;
+  const int KB = K / BLOCK_K;
   const int TILE_SIZE = TILE_N * sizeof(TB);
 
   printf("### convert_B_packed_format: NB = %d, KB = %d, tile_size = %d\n", NB, KB, TILE_SIZE);
@@ -369,8 +394,164 @@ void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, in
   }
 }
 
-template <typename TA, typename TB, typename TC, int BLCK_SIZE>
-void tiny_gemm_kernel(int M, int N, int KB, const void * RESTRICT _A, const void * RESTRICT _B, TC * RESTRICT C, int ldc) {
+// TODO: remove `BLOCK_K` ?
+template <typename TA, typename TB, typename TC, int BLOCK_M, int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_vnni {};
+
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_vnni<block_q8_0, block_q4_0, float, BLOCK_M, BLOCK_N, BLOCK_K> {
+  static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
+    printf("### tinygemm_kernel_vnni - q4_0, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", BLOCK_M, BLOCK_N, BLOCK_K);
+
+    constexpr int COLS = BLOCK_N / 16;
+    const int TILE_SIZE = TILE_N * sizeof(block_q4_0);
+
+    const block_q8_0 * RESTRICT A = static_cast<const block_q8_0 *>(_A);
+    const char * RESTRICT B = static_cast<const char *>(_B);
+
+    __m512i va[8];
+    __m512i vb[8];
+    __m512 vc[COLS];
+    __m512 vd1;
+
+    // sum of offsets, shared across COLS
+    //
+    // avx512-vnni does not have `_mm512_dpbssd_epi32` or `_mm512_sign_epi8`,
+    // need to transfrom ss to us:
+    //   a * (b - 8) is equavilent to b * a - 8 * a
+    //   s    u   u                   u   s   u   s
+    //
+    __m512i sumoff;
+
+    const __m512i off = _mm512_set1_epi8(8);
+    const __m512i lowMask = _mm512_set1_epi8(0xF);
+
+    auto loadc = [&](int col) {
+      vc[col] = _mm512_setzero_ps();
+    };
+    Unroll<COLS>{}(loadc);
+
+    auto compute = [&](int col, int i) {
+      // load a and compute sumoff
+      if (col == 0) {
+        const int32_t * a_ptr = reinterpret_cast<const int32_t *>(A[0 * KB + i].qs);
+        sumoff = _mm512_setzero_si512();
+        for (int k = 0; k < 8; ++k) {
+          va[k] = _mm512_set1_epi32(a_ptr[k]);
+          sumoff = _mm512_dpbusd_epi32(sumoff, off, va[k]);
+        }
+        vd1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[0 * KB + i].d));
+      }
+
+      // load b
+      const char * b_ptr = B + PACKED_INDEX(col, i, KB, TILE_SIZE);
+      for (int k = 0; k < 8; k += 2) {
+        __m512i bytes = _mm512_loadu_si512((const __m512i *)(b_ptr + k * 32));
+        vb[k + 0] = _mm512_and_si512(bytes, lowMask);
+        vb[k + 1] = _mm512_and_si512(_mm512_srli_epi16(bytes, 4), lowMask);
+      }
+      const int offset = TILE_N * TILE_K / 2;
+      const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(b_ptr + offset)));
+
+       __m512i vsum = _mm512_setzero_si512();
+      for (int k = 0; k < 8; ++k) {
+        vsum = _mm512_dpbusd_epi32(vsum, vb[k], va[k]);
+      }
+      //printf("@@@@@@@@@ vsum and sumoff\n");
+      //print_512i(vsum);
+      //print_512i(sumoff);
+      vsum = _mm512_sub_epi32(vsum, sumoff);
+
+      vc[col] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vsum), _mm512_mul_ps(vd0, vd1), vc[col]);
+    };
+
+    for (int i = 0; i < KB; ++i) {
+      Unroll<COLS>{}(compute, i);
+    }
+
+    //store to C
+    auto storec = [&](int col) {
+      _mm512_storeu_ps((__m512i*)(C + 0 * ldc + col * 16), vc[col]);
+    };
+    Unroll<COLS>{}(storec);
+  }
+};
+
+template <int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_vnni<block_q8_1, block_q4_1, float, 1, BLOCK_N, BLOCK_K> {
+  static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
+    printf("### tinygemm_kernel_vnni - q4_1, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", 1, BLOCK_N, BLOCK_K);
+
+    constexpr int COLS = BLOCK_N / 16;
+    const int TILE_SIZE = TILE_N * sizeof(block_q4_1);
+
+    const block_q8_1 * RESTRICT A = static_cast<const block_q8_1 *>(_A);
+    const char * RESTRICT B = static_cast<const char *>(_B);
+
+    __m512i va[8];
+    __m512i vb[8];
+    __m512 vc[COLS];
+    __m512 vd1, vs1;
+
+    const __m512i lowMask = _mm512_set1_epi8(0xF);
+
+    auto loadc = [&](int col) {
+      vc[col] = _mm512_setzero_ps();
+    };
+    Unroll<COLS>{}(loadc);
+
+    auto compute = [&](int col, int i) {
+      // load a
+      if (col == 0) {
+        const int32_t * a_ptr = reinterpret_cast<const int32_t *>(A[0 * KB + i].qs);
+        for (int k = 0; k < 8; ++k) {
+          va[k] = _mm512_set1_epi32(a_ptr[k]);
+        }
+        vd1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[0 * KB + i].d));
+        vs1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[0 * KB + i].s));
+      }
+
+      // load b
+      const char * b_ptr = B + PACKED_INDEX(col, i, KB, TILE_SIZE);
+      for (int k = 0; k < 8; k += 2) {
+        __m512i bytes = _mm512_loadu_si512((const __m512i *)(b_ptr + k * 32));
+        vb[k + 0] = _mm512_and_si512(bytes, lowMask);
+        vb[k + 1] = _mm512_and_si512(_mm512_srli_epi16(bytes, 4), lowMask);
+      }
+      const int offset = TILE_N * TILE_K / 2;
+      const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(b_ptr + offset)));
+      const __m512 vm0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(b_ptr + offset + TILE_N * sizeof(ggml_half))));
+
+       __m512i vsum = _mm512_setzero_si512();
+      for (int k = 0; k < 8; ++k) {
+        vsum = _mm512_dpbusd_epi32(vsum, vb[k], va[k]);
+      }
+
+      vc[col] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vsum), _mm512_mul_ps(vd0, vd1), vc[col]);
+      vc[col] = _mm512_fmadd_ps(vm0, vs1, vc[col]);
+    };
+
+    for (int i = 0; i < KB; ++i) {
+      Unroll<COLS>{}(compute, i);
+    }
+
+    //store to C
+    auto storec = [&](int col) {
+      _mm512_storeu_ps((__m512i*)(C + 0 * ldc + col * 16), vc[col]);
+    };
+    Unroll<COLS>{}(storec);
+  }
+};
+
+#define LAUNCH_TINYGEMM_KERNEL_VNNI(NB_SIZE)                                         \
+    tinygemm_kernel_vnni<vec_dot_type, type, float, 1, NB_SIZE, blck_size>::apply(   \
+        KB, (const char *)wdata + 0 * row_size_A,                                    \
+        (const char *)src0->extra + PACKED_INDEX(nb * kTilesN, 0, KB, TILE_SIZE),    \
+        (float *) dst->data + 0 * N + nb_start, ldc)
+
+// TODO: remove `BLOCK_K` ?
+template <typename TA, typename TB, typename TC, int BLOCK_K>
+void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const void * RESTRICT _B, TC * RESTRICT C, int ldc) {
   using packed_B_t = packed_B_type<TB>;
   const int TILE_SIZE = TILE_N * sizeof(TB);
 
@@ -582,21 +763,54 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
     return;
   }
 
+  // expect weight to be pre-packed here
+  GGML_ASSERT(src0->extra != nullptr);
+
+  if (M == 1) {
+    // MB = 1 and handle 4 tiles in each block
+    constexpr int kTilesN = 6;
+    constexpr int BLOCK_N = TILE_N * kTilesN;
+    const int NB = div_up(N, BLOCK_N);
+
+    int begin, end;
+    balance211(NB, nth, ith, begin, end);
+    printf("vnni fallback: @@@ NB = %d, begin = %d, end = %d\n", NB, begin, end);
+
+    GGML_DISPATCH_QTYPES(TYPE, [&] {
+      const int KB = K / blck_size;
+      const int TILE_SIZE = TILE_N * sizeof(type);
+      const int row_size_A = KB * sizeof(vec_dot_type);
+      for (int i = begin; i < end; ++i) {
+        int nb = i % NB;
+        int nb_start = nb * BLOCK_N;
+        int nb_size = std::min(BLOCK_N, N - nb_start); // 32, 64, 96
+
+        switch (nb_size) {
+          case 96: LAUNCH_TINYGEMM_KERNEL_VNNI(96); break;
+          case 64: LAUNCH_TINYGEMM_KERNEL_VNNI(64); break;
+          case 32: LAUNCH_TINYGEMM_KERNEL_VNNI(32); break;
+          default: fprintf(stderr, "Unexpected n block size!\n");
+        }
+      }
+    });
+    return;
+  }
+
   // handle 4 tiles at a tile
   constexpr int BLOCK_M = TILE_M * 2;
   constexpr int BLOCK_N = TILE_N * 2;
   const int MB = div_up(M, BLOCK_M);
   const int NB = div_up(N, BLOCK_N);
 
+  // TODO: add parallel_for
   int begin, end;
   balance211(MB * NB, nth, ith, begin, end);
   printf("@@@ MB = %d, NB = %d, begin = %d, end = %d\n", MB, NB, begin, end);
-  GGML_ASSERT(src0->extra != nullptr);
 
   GGML_DISPATCH_QTYPES(TYPE, [&] {
     const int KB = K / blck_size;
     const int TILE_SIZE = TILE_N * sizeof(type);
-    const size_t row_size_A = KB * sizeof(vec_dot_type);
+    const int row_size_A = KB * sizeof(vec_dot_type);
 
     for (int i = begin; i < end; ++i) {
       int mb = i / NB;
@@ -607,7 +821,7 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
       int nb_start = nb * BLOCK_N;
       int nb_size = BLOCK_N;
 
-      tiny_gemm_kernel<vec_dot_type, type, float, blck_size>(
+      tinygemm_kernel_amx<vec_dot_type, type, float, blck_size>(
           mb_size, nb_size, KB,
           (const char *)wdata + mb_start * row_size_A,
           (const char *)src0->extra + PACKED_INDEX(nb * 2, 0, KB, TILE_SIZE),
