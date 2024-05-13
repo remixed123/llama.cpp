@@ -94,10 +94,21 @@ inline void from_float<block_q8_1>(const float * x, char * vy, int64_t k) {
   quantize_row_q8_1(x, vy, k);
 }
 
+// type traits
 template <typename T> struct PackedTypes {};
 template <> struct PackedTypes<block_q4_0> { using type = int8_t; };
 template <> struct PackedTypes<block_q4_1> { using type = uint8_t; };
+template <> struct PackedTypes<block_q8_0> { using type = int8_t; };
 template <typename T> using packed_B_type = typename PackedTypes<T>::type;
+
+template <typename T>
+struct do_compensate : std::integral_constant<
+    bool, std::is_same<T, block_q8_0>::value> {};
+
+template <typename T>
+struct do_unpack : std::integral_constant<bool,
+    std::is_same<T, block_q4_0>::value ||
+    std::is_same<T, block_q4_1>::value> {};
 
 #define GGML_DISPATCH_QTYPES(QT, ...)                                          \
   [&] {                                                                        \
@@ -112,6 +123,12 @@ template <typename T> using packed_B_type = typename PackedTypes<T>::type;
         using type = block_q4_1;                                               \
         using vec_dot_type = block_q8_1;                                       \
         constexpr int blck_size = QK4_1;                                       \
+        return __VA_ARGS__();                                                  \
+      }                                                                        \
+      case GGML_TYPE_Q8_0: {                                                   \
+        using type = block_q8_0;                                               \
+        using vec_dot_type = block_q8_0;                                       \
+        constexpr int blck_size = QK8_0;                                       \
         return __VA_ARGS__();                                                  \
       }                                                                        \
       default:                                                                 \
@@ -166,6 +183,28 @@ void ggml_tile_config_init(void) {
     _tile_loadconfig(&tc);
     printf("###\nggml_tile_config_init finished!\n");
   }
+}
+
+// we need an extra 16 * 4B (TILE_N * int32_t) for each NB/KB block
+// when compensation is needed.
+// See the notes `s8s8 igemm compensation in avx512-vnni` for detail.
+template <typename TB>
+int get_tile_size() {
+  int tile_size = TILE_N * sizeof(TB);
+  if (do_compensate<TB>::value) {
+    tile_size += TILE_N * sizeof(int32_t);
+  }
+  return tile_size;
+}
+
+template <typename TB, int BLOCK_K>
+int get_row_size(int K) {
+  int KB = K / BLOCK_K;
+  int row_size = KB * sizeof(TB);
+  if (do_compensate<TB>::value) {
+    row_size += KB * sizeof(int32_t);
+  }
+  return row_size;
 }
 
 void unpack_A(int8_t * RESTRICT tile, const block_q8_0 * RESTRICT A, int lda, int nr) {
@@ -258,6 +297,25 @@ inline void pack_qs(void * RESTRICT packed_B, const TB * RESTRICT B, int KB) {
   }
 }
 
+template <>
+inline void pack_qs<block_q8_0>(void * RESTRICT packed_B, const block_q8_0 * RESTRICT B, int KB) {
+  __m256i v[8], v2[8];
+  for (int n = 0; n < 8; ++n) {
+    v[n] = _mm256_loadu_si256((const __m256i *)(B[n * KB].qs));
+  }
+  transpose_8x8_32bit(v, v2);
+  for (int n = 0; n < 8; ++n) {
+    _mm256_storeu_si256((__m256i *)((char *)packed_B + n * 64), v2[n]);
+  }
+  for (int n = 0; n < 8; ++n) {
+    v[n] = _mm256_loadu_si256((const __m256i *)(B[(n + 8) * KB].qs));
+  }
+  transpose_8x8_32bit(v, v2);
+  for (int n = 0; n < 8; ++n) {
+    _mm256_storeu_si256((__m256i *)((char *)packed_B + n * 64 + 32), v2[n]);
+  }
+}
+
 void pack_B(void * RESTRICT packed_B, const block_q4_0 * RESTRICT B, int KB) {
   pack_qs(packed_B, B, KB);
   ggml_half * d0 = reinterpret_cast<ggml_half *>((char *)packed_B + TILE_N * TILE_K / 2);
@@ -276,8 +334,37 @@ void pack_B(void * RESTRICT packed_B, const block_q4_1 * RESTRICT B, int KB) {
   }
 }
 
+// Notes: s8s8 igemm compensation in avx512-vnni
+inline void s8s8_compensation(void * RESTRICT packed_B) {
+  // packed_B layout:
+  //   quants {TILE_N, TILEK}  int8_t
+  //   d0     {TILE_N}      ggml_half
+  //   comp   {TILE_N}        int32_t
+  //
+  const int offset = TILE_N * TILE_K + TILE_N * sizeof(ggml_half);
+  __m512i vcomp = _mm512_setzero_si512();
+  const __m512i off = _mm512_set1_epi8(static_cast<char>(0x80));
+  for (int k = 0; k < 8; ++k) {
+    __m512i vb = _mm512_loadu_si512((const __m512i *)((const char *)packed_B + k * 64));
+    vcomp = _mm512_dpbusd_epi32(vcomp, off, vb);
+  }
+  _mm512_storeu_si512((__m512i *)((char *)(packed_B) + offset), vcomp);
+}
+
+void pack_B(void * RESTRICT packed_B, const block_q8_0 * RESTRICT B, int KB) {
+  pack_qs(packed_B, B, KB);
+  ggml_half * d0 = reinterpret_cast<ggml_half *>((char *)packed_B + TILE_N * TILE_K);
+  for (int n = 0; n < TILE_N; ++n) {
+    d0[n] = B[n * KB].d;
+  }
+  s8s8_compensation(packed_B);
+}
+
 template<typename TB, typename packed_B_t = packed_B_type<TB>>
-void unpack_B(packed_B_t * RESTRICT tile, const void * RESTRICT packed_B);
+void unpack_B(packed_B_t * RESTRICT tile, const void * RESTRICT packed_B) {
+  GGML_UNUSED(tile);
+  GGML_UNUSED(packed_B);
+};
 
 template <>
 void unpack_B<block_q4_0>(int8_t * RESTRICT tile, const void * RESTRICT packed_B) {
@@ -309,7 +396,7 @@ void acc_C(float * RESTRICT C, int ldc, const int32_t * RESTRICT tile, const TA 
 
 template <>
 void acc_C<block_q8_0, block_q4_0>(float * RESTRICT C, int ldc, const int32_t * RESTRICT tile, const block_q8_0 * A, int lda, const void * packed_B, int nr, bool is_acc) {
-  const int offset = TILE_N * TILE_K /2;
+  const int offset = TILE_N * TILE_K / 2;
   const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)((const char *)packed_B + offset)));
 
   for (int m = 0; m < nr; ++m) {
@@ -376,6 +463,26 @@ void acc_C<block_q8_1, block_q4_1>(float * RESTRICT C, int ldc, const int32_t * 
   }
 }
 
+template <>
+void acc_C<block_q8_0, block_q8_0>(float * RESTRICT C, int ldc, const int32_t * RESTRICT tile, const block_q8_0 * A, int lda, const void * packed_B, int nr, bool is_acc) {
+  const int offset = TILE_N * TILE_K;
+  const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)((const char *)packed_B + offset)));
+
+  for (int m = 0; m < nr; ++m) {
+    const __m512 vd1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[m * lda].d));
+    const __m512 vtile = _mm512_cvtepi32_ps(_mm512_loadu_si512(tile + m * TILE_N));
+
+    __m512 vsum;
+    if (is_acc) {
+      vsum = _mm512_loadu_ps(C + m * ldc);
+    } else {
+      vsum = _mm512_set1_ps(0.f);
+    }
+    vsum = _mm512_fmadd_ps(vtile, _mm512_mul_ps(vd0, vd1), vsum);
+    _mm512_storeu_ps(C + m * ldc, vsum);
+  }
+}
+
 // re-organize in the format {NB, KB, TILE_SIZE}:
 #define PACKED_INDEX(n, k, KB, tile_size) (n * KB + k) * tile_size
 
@@ -383,7 +490,7 @@ template<typename TB, int BLOCK_K>
 void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, int N, int K) {
   const int NB = N / TILE_N;
   const int KB = K / BLOCK_K;
-  const int TILE_SIZE = TILE_N * sizeof(TB);
+  const int TILE_SIZE = get_tile_size<TB>();
 
   printf("### convert_B_packed_format: NB = %d, KB = %d, tile_size = %d\n", NB, KB, TILE_SIZE);
   for (int n = 0; n < NB; ++n) {
@@ -543,6 +650,74 @@ struct tinygemm_kernel_vnni<block_q8_1, block_q4_1, float, 1, BLOCK_N, BLOCK_K> 
   }
 };
 
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_vnni<block_q8_0, block_q8_0, float, BLOCK_M, BLOCK_N, BLOCK_K> {
+  static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
+    printf("### tinygemm_kernel_vnni - q8_0, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", BLOCK_M, BLOCK_N, BLOCK_K);
+
+    constexpr int COLS = BLOCK_N / 16;
+    const int TILE_SIZE = TILE_N * sizeof(block_q8_0) + TILE_N * sizeof(int32_t);
+
+    const block_q8_0 * RESTRICT A = static_cast<const block_q8_0 *>(_A);
+    const char * RESTRICT B = static_cast<const char *>(_B);
+
+    __m512i va[8];
+    __m512i vb[8];
+    __m512 vc[COLS];
+    __m512 vd1;
+
+    // change s8s8 to u8s8 with compensate
+    //   a * b = (a + 128) * b - 128 * b
+    //   s   s       u       s    u    s
+    const __m512i off = _mm512_set1_epi8(static_cast<char>(0x80));
+
+    auto loadc = [&](int col) {
+      vc[col] = _mm512_setzero_ps();
+    };
+    Unroll<COLS>{}(loadc);
+
+    auto compute = [&](int col, int i) {
+      // load a and add offset 128
+      if (col == 0) {
+        const int32_t * a_ptr = reinterpret_cast<const int32_t *>(A[0 * KB + i].qs);
+        for (int k = 0; k < 8; ++k) {
+          va[k] = _mm512_set1_epi32(a_ptr[k]);
+          va[k] = _mm512_add_epi8(va[k], off);
+        }
+        vd1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[0 * KB + i].d));
+      }
+
+      // load b
+      const char * b_ptr = B + PACKED_INDEX(col, i, KB, TILE_SIZE);
+      for (int k = 0; k < 8; ++k) {
+        vb[k] = _mm512_loadu_si512((const __m512i *)(b_ptr + k * 64));
+      }
+      const int offset = TILE_N * TILE_K;
+      const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(b_ptr + offset)));
+      const int offset2 = TILE_N * TILE_K + TILE_N * sizeof(ggml_half);
+      const __m512i vcomp = _mm512_loadu_si512((const __m512i *)(b_ptr + offset2));
+
+      __m512i vsum = _mm512_setzero_si512();
+      for (int k = 0; k < 8; ++k) {
+        vsum = _mm512_dpbusd_epi32(vsum, va[k], vb[k]);
+      }
+      vsum = _mm512_sub_epi32(vsum, vcomp);
+
+      vc[col] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vsum), _mm512_mul_ps(vd0, vd1), vc[col]);
+    };
+
+    for (int i = 0; i < KB; ++i) {
+      Unroll<COLS>{}(compute, i);
+    }
+
+    //store to C
+    auto storec = [&](int col) {
+      _mm512_storeu_ps((__m512i*)(C + 0 * ldc + col * 16), vc[col]);
+    };
+    Unroll<COLS>{}(storec);
+  }
+};
+
 #define LAUNCH_TINYGEMM_KERNEL_VNNI(NB_SIZE)                                         \
     tinygemm_kernel_vnni<vec_dot_type, type, float, 1, NB_SIZE, blck_size>::apply(   \
         KB, (const char *)wdata + 0 * row_size_A,                                    \
@@ -553,7 +728,8 @@ struct tinygemm_kernel_vnni<block_q8_1, block_q4_1, float, 1, BLOCK_N, BLOCK_K> 
 template <typename TA, typename TB, typename TC, int BLOCK_K>
 void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const void * RESTRICT _B, TC * RESTRICT C, int ldc) {
   using packed_B_t = packed_B_type<TB>;
-  const int TILE_SIZE = TILE_N * sizeof(TB);
+  const int TILE_SIZE = get_tile_size<TB>();
+  const bool need_unpack = do_unpack<TB>::value;
 
   GGML_ASSERT(M <= 2 * TILE_M && N == 2 * TILE_N);
   const TA * RESTRICT A = static_cast<const TA *>(_A);
@@ -580,11 +756,19 @@ void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const v
       _tile_zero(TMM6);
       _tile_zero(TMM7);
 
-      unpack_B<TB>(Tile0, B + PACKED_INDEX(0, i, KB, TILE_SIZE));
-      _tile_loadd(TMM0, Tile0, TILE_N * VNNI_BLK);
+      if (need_unpack) {
+        unpack_B<TB>(Tile0, B + PACKED_INDEX(0, i, KB, TILE_SIZE));
+        _tile_loadd(TMM0, Tile0, TILE_N * VNNI_BLK);
+      } else {
+        _tile_loadd(TMM0, B + PACKED_INDEX(0, i, KB, TILE_SIZE), TILE_N * VNNI_BLK);
+      }
 
-      unpack_B<TB>(Tile1, B + PACKED_INDEX(1, i, KB, TILE_SIZE));
-      _tile_loadd(TMM1, Tile1, TILE_N * VNNI_BLK);
+      if (need_unpack) {
+        unpack_B<TB>(Tile1, B + PACKED_INDEX(1, i, KB, TILE_SIZE));
+        _tile_loadd(TMM1, Tile1, TILE_N * VNNI_BLK);
+      } else {
+        _tile_loadd(TMM1, B + PACKED_INDEX(1, i, KB, TILE_SIZE), TILE_N * VNNI_BLK);
+      }
 
       _tile_loadd(TMM2, A[i].qs, lda);
       _tile_loadd(TMM3, A[TILE_M * KB + i].qs, lda);
@@ -614,11 +798,19 @@ void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const v
         _tile_zero(TMM7);
       }
 
-      unpack_B<TB>(Tile0, B + PACKED_INDEX(0, i, KB, TILE_SIZE));
-      _tile_loadd(TMM0, Tile0, TILE_N * VNNI_BLK);
+      if (need_unpack) {
+        unpack_B<TB>(Tile0, B + PACKED_INDEX(0, i, KB, TILE_SIZE));
+        _tile_loadd(TMM0, Tile0, TILE_N * VNNI_BLK);
+      } else {
+        _tile_loadd(TMM0, B + PACKED_INDEX(0, i, KB, TILE_SIZE), TILE_N * VNNI_BLK);
+      }
 
-      unpack_B<TB>(Tile1, B + PACKED_INDEX(1, i, KB, TILE_SIZE));
-      _tile_loadd(TMM1, Tile1, TILE_N * VNNI_BLK);
+      if (need_unpack) {
+        unpack_B<TB>(Tile1, B + PACKED_INDEX(1, i, KB, TILE_SIZE));
+        _tile_loadd(TMM1, Tile1, TILE_N * VNNI_BLK);
+      } else {
+        _tile_loadd(TMM1, B + PACKED_INDEX(1, i, KB, TILE_SIZE), TILE_N * VNNI_BLK);
+      }
 
       if (m0 == TILE_M) {
         _tile_loadd(TMM2, A[i].qs, lda);
@@ -692,7 +884,8 @@ bool ggml_compute_forward_mul_mat_use_amx(struct ggml_tensor * dst) {
 
   // amx kernels enables for Q4_0, Q4_1
   bool has_amx_kernels = (type == GGML_TYPE_Q4_0) ||
-      (type == GGML_TYPE_Q4_1);
+      (type == GGML_TYPE_Q4_1) ||
+      (type == GGML_TYPE_Q8_0);
 
   // handle only 2d gemm for now
   auto is_contiguous_2d = [](const struct ggml_tensor * t) {
@@ -751,7 +944,8 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
       // pack mat B to vnni format
       GGML_ASSERT(TILE_K == blck_size);
-      const size_t row_size_B = K / blck_size * sizeof(type);
+      //const size_t row_size_B = K / blck_size * sizeof(type);
+      const size_t row_size_B = get_row_size<type, blck_size>(K);
       src0->extra = aligned_alloc(64, N * row_size_B);
       convert_B_packed_format<type, blck_size>((void *)src0->extra, (const type *)src0->data, N, K);
 
@@ -778,7 +972,7 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
     GGML_DISPATCH_QTYPES(TYPE, [&] {
       const int KB = K / blck_size;
-      const int TILE_SIZE = TILE_N * sizeof(type);
+      const int TILE_SIZE = get_tile_size<type>();
       const int row_size_A = KB * sizeof(vec_dot_type);
       for (int i = begin; i < end; ++i) {
         int nb = i % NB;
@@ -809,7 +1003,7 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
   GGML_DISPATCH_QTYPES(TYPE, [&] {
     const int KB = K / blck_size;
-    const int TILE_SIZE = TILE_N * sizeof(type);
+    const int TILE_SIZE = get_tile_size<type>();
     const int row_size_A = KB * sizeof(vec_dot_type);
 
     for (int i = begin; i < end; ++i) {

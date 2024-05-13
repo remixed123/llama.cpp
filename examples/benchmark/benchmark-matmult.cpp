@@ -154,7 +154,16 @@ int main(int argc, char ** argv)  {
     //printf("Memsize required = %i\n", sizex*sizex);
 
     // TODO: perform the bench for all types or for a user specified type
-    const ggml_type qtype = dtype == 1 ? GGML_TYPE_Q4_1 : GGML_TYPE_Q4_0;
+    ggml_type qtype;
+    if (dtype == 1) {
+      qtype = GGML_TYPE_Q4_1;
+    } else if (dtype == 0) {
+      qtype = GGML_TYPE_Q4_0;
+    } else if (dtype == 2) {
+      qtype = GGML_TYPE_Q8_0;
+    } else {
+      qtype = GGML_TYPE_Q4_0;
+    }
 
     size_t ctx_size = 0;
     ctx_size += ggml_row_size(GGML_TYPE_F32, sizex*sizey);
