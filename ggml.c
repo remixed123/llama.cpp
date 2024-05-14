@@ -12459,11 +12459,11 @@ static void ggml_compute_forward_mul_mat(
     //   compute by src0 rows
 
     if (params->type == GGML_TASK_TYPE_INIT) {
-        printf("\n### GGML_TASK_TYPE_INIT\n");
+        //printf("\n### GGML_TASK_TYPE_INIT\n");
     } else if (params->type == GGML_TASK_TYPE_COMPUTE) {
-        printf("\n### GGML_TASK_TYPE_COMPUTE\n");
+        //printf("\n### GGML_TASK_TYPE_COMPUTE\n");
     } else if (params->type == GGML_TASK_TYPE_FINALIZE) {
-        printf("\n### GGML_TASK_TYPE_FINALIZE\n");
+        //printf("\n### GGML_TASK_TYPE_FINALIZE\n");
     }
 
 #if defined(GGML_USE_CLBLAST)
@@ -12476,13 +12476,11 @@ static void ggml_compute_forward_mul_mat(
 #endif
 
 #if GGML_USE_AMX
-    float* dst_copy = (float*)malloc(ne1 * ne0 * sizeof(float));
+    //float* dst_copy = (float*)malloc(ne1 * ne0 * sizeof(float));
     if (ggml_compute_forward_mul_mat_use_amx(dst) && ggml_amx_initialized) {
 
         ggml_mul_mat_amx(params, dst);
-        //printf("\n### amx result: \n");
-        //print_C((float*)(dst->data), ne1, ne0);
-        //print_C((float*)(dst->data), 48, 16);
+#if 0
         sleep(1);
         if (ith == 0) {
             //printf("\n### amx result: \n");
@@ -12496,7 +12494,9 @@ static void ggml_compute_forward_mul_mat(
             }
         }
         sleep(1);
-        //return;
+#else
+        return;
+#endif
     }
 #endif
 
