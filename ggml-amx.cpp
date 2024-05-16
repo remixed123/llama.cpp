@@ -987,12 +987,13 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
         from_float<vec_dot_type>(A_data + m * K, packed_A_data + m * row_size_A, K);
       }
 
-      // pack mat B to vnni format
       GGML_ASSERT(TILE_K == blck_size);
-      const size_t row_size_B = get_row_size<type, blck_size>(K);
-      src0->extra = aligned_alloc(64, N * row_size_B);
-      convert_B_packed_format<type, blck_size>((void *)src0->extra, (const type *)src0->data, N, K);
-
+      // pack mat B to vnni format
+      if (src0->extra == nullptr) {
+        const size_t row_size_B = get_row_size<type, blck_size>(K);
+        src0->extra = aligned_alloc(64, N * row_size_B);
+        convert_B_packed_format<type, blck_size>((void *)src0->extra, (const type *)src0->data, N, K);
+      }
     });
     return;
   }
@@ -1042,7 +1043,7 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   // TODO: add parallel_for
   int begin, end;
   balance211(MB * NB, nth, ith, begin, end);
-  //printf("@@@ MB = %d, NB = %d, begin = %d, end = %d\n", MB, NB, begin, end);
+  //printf("@@@ amx kernel: MB = %d, NB = %d, begin = %d, end = %d\n", MB, NB, begin, end);
 
   GGML_DISPATCH_QTYPES(TYPE, [&] {
     const int KB = K / blck_size;

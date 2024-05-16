@@ -201,8 +201,8 @@ ifdef LLAMA_SCHED_MAX_COPIES
 endif
 
 ifdef LLAMA_DEBUG
-	MK_CFLAGS   += -O0 -g -fsanitize=address
-	MK_CXXFLAGS += -O0 -g -fsanitize=address
+	MK_CFLAGS   += -O0 -g
+	MK_CXXFLAGS += -O0 -g
 	MK_LDFLAGS  += -g
 
 	ifeq ($(UNAME_S),Linux)
