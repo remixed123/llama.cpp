@@ -399,7 +399,7 @@ endif()
 
 if (LLAMA_AARCH64)
     set(GGML_HEADERS_AARCH64 ggml-aarch64.h)
-    set(GGML_SOURCES_AARCH64 ggml-aarch64.cpp)
+    set(GGML_SOURCES_AARCH64 ggml-aarch64.c)
 endif()
 
 if (LLAMA_QKK_64)

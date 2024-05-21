@@ -739,8 +739,8 @@ ggml-backend.o: ggml-backend.c ggml.h ggml-backend.h
 ggml-quants.o: ggml-quants.c ggml.h ggml-quants.h ggml-common.h
 	$(CC) $(CFLAGS)    -c $< -o $@
 
-ggml-aarch64.o: ggml-aarch64.cpp ggml.h ggml-aarch64.h ggml-common.h
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+ggml-aarch64.o: ggml-aarch64.c ggml.h ggml-aarch64.h ggml-common.h
+	$(CC) $(CFLAGS)    -c $< -o $@
 
 unicode.o: unicode.cpp unicode.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
