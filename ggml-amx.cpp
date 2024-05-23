@@ -11,6 +11,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 #if (defined(_WIN32) || defined(_WIN64))
 #define RESTRICT __restrict
 #else
@@ -65,6 +69,39 @@ void balance211(T n, T nth, T ith, T& n_start, T& n_end) {
   n_end += n_start;
 }
 
+// parallel with openmp, if openmp is not enabled, go sequential
+template <typename func_t>
+inline void parallel_for(int n, const func_t& f) {
+#if defined(_OPENMP)
+#pragma omp parallel
+{
+  int num_threads = omp_get_num_threads();
+  int tid = omp_get_thread_num();
+
+  int tbegin, tend;
+  balance211(n, num_threads, tid, tbegin, tend);
+  f(tbegin, tend);
+}
+#else
+  f(0, n);
+#endif
+}
+
+// when openmp is enabled, parallel with openmp.
+// when openmp is disabled, parallel with pthread.
+template <typename func_t>
+inline void parallel_for(int nth, int ith, int n, const func_t& f) {
+#if defined(_OPENMP)
+  // forbid nested parallelism of pthread and openmp
+  GGML_ASSERT(nth == 1 && ith == 0);
+  parallel_for(n, f);
+#else
+  int tbegin, tend;
+  balance211(n, nth, ith, tbegin, tend);
+  f(tbegin, tend);
+#endif
+}
+
 // Forced unrolling
 template <int n>
 struct Unroll {
@@ -95,6 +132,12 @@ inline void from_float<block_q8_0>(const float * x, char * vy, int64_t k) {
 template <>
 inline void from_float<block_q8_1>(const float * x, char * vy, int64_t k) {
   quantize_row_q8_1(x, vy, k);
+}
+
+inline float FP16_TO_FP32(ggml_half val) {
+  __m256i v = _mm256_setr_epi16(val, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  __m512 o = _mm512_cvtph_ps(v);
+  return _mm512_cvtss_f32(o);
 }
 
 // type traits
@@ -533,12 +576,15 @@ void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, in
   const int TILE_SIZE = get_tile_size<TB>();
 
   //printf("### convert_B_packed_format: NB = %d, KB = %d, tile_size = %d\n", NB, KB, TILE_SIZE);
-  for (int n = 0; n < NB; ++n) {
-    for (int k = 0; k < KB; ++k) {
-      int n0 = n * TILE_N;
-      pack_B((char *)packed_B + PACKED_INDEX(n, k, KB, TILE_SIZE), &B[n0 * KB + k], KB);
+  // parallel on NB should be enough
+  parallel_for(NB, [&](int begin, int end) {
+    for (int n = begin; n < end; ++n) {
+      for (int k = 0; k < KB; ++k) {
+        int n0 = n * TILE_N;
+        pack_B((char *)packed_B + PACKED_INDEX(n, k, KB, TILE_SIZE), &B[n0 * KB + k], KB);
+      }
     }
-  }
+  });
 }
 
 // TODO: remove `BLOCK_K` ?
@@ -557,7 +603,6 @@ struct tinygemm_kernel_vnni<block_q8_0, block_q4_0, float, BLOCK_M, BLOCK_N, BLO
     const char * RESTRICT B = static_cast<const char *>(_B);
 
     __m512i va[8];
-    __m512i vb[8];
     __m512 vc[COLS];
     __m512 vd1;
 
@@ -587,23 +632,21 @@ struct tinygemm_kernel_vnni<block_q8_0, block_q4_0, float, BLOCK_M, BLOCK_N, BLO
           va[k] = _mm512_set1_epi32(a_ptr[k]);
           vcomp = _mm512_dpbusd_epi32(vcomp, off, va[k]);
         }
-        vd1 = _mm512_set1_ps(GGML_FP16_TO_FP32(A[0 * KB + i].d));
+        vd1 = _mm512_set1_ps(FP16_TO_FP32(A[0 * KB + i].d));
       }
 
       // load b
+       __m512i vsum = _mm512_setzero_si512();
       const char * b_ptr = B + PACKED_INDEX(col, i, KB, TILE_SIZE);
       for (int k = 0; k < 8; k += 2) {
         __m512i bytes = _mm512_loadu_si512((const __m512i *)(b_ptr + k * 32));
-        vb[k + 0] = _mm512_and_si512(bytes, lowMask);
-        vb[k + 1] = _mm512_and_si512(_mm512_srli_epi16(bytes, 4), lowMask);
+        __m512i vb0 = _mm512_and_si512(bytes, lowMask);
+        vsum = _mm512_dpbusd_epi32(vsum, vb0, va[k + 0]);
+        __m512i vb1 = _mm512_and_si512(_mm512_srli_epi16(bytes, 4), lowMask);
+        vsum = _mm512_dpbusd_epi32(vsum, vb1, va[k + 1]);
       }
       const int offset = TILE_N * TILE_K / 2;
       const __m512 vd0 = _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(b_ptr + offset)));
-
-       __m512i vsum = _mm512_setzero_si512();
-      for (int k = 0; k < 8; ++k) {
-        vsum = _mm512_dpbusd_epi32(vsum, vb[k], va[k]);
-      }
       vsum = _mm512_sub_epi32(vsum, vcomp);
 
       vc[col] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vsum), _mm512_mul_ps(vd0, vd1), vc[col]);
@@ -958,6 +1001,8 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   struct ggml_tensor * src0 = dst->src[0];
   struct ggml_tensor * src1 = dst->src[1];
 
+  const enum ggml_type TYPE = src0->type;
+
   const int ith = params->ith;
   const int nth = params->nth;
 
@@ -965,10 +1010,8 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   const int N = dst->ne[0];
   const int K = src0->ne[0];
   const int ldc = dst->nb[1] / dst->nb[0];
-  //printf("\n@@@@@@ M = %d, N = %d, K = %d\n", M, N, K);
 
-  const enum ggml_type TYPE = src0->type;
-
+  // packed A data
   char* wdata = static_cast<char *>(params->wdata);
 
   if (params->type == GGML_TASK_TYPE_INIT) {
@@ -982,9 +1025,8 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
       // quantize mat A
       const float * A_data = static_cast<const float *>(src1->data);
-      char * packed_A_data = static_cast<char *>(params->wdata);
       for (int m = 0; m < M; ++m) {
-        from_float<vec_dot_type>(A_data + m * K, packed_A_data + m * row_size_A, K);
+        from_float<vec_dot_type>(A_data + m * K, wdata + m * row_size_A, K);
       }
 
       GGML_ASSERT(TILE_K == blck_size);
@@ -1007,29 +1049,30 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
   if (M == 1) {
     // MB = 1 and handle 4 tiles in each block
-    constexpr int kTilesN = 6;
+    constexpr int kTilesN = 8;
     constexpr int BLOCK_N = TILE_N * kTilesN;
     const int NB = div_up(N, BLOCK_N);
 
-    int begin, end;
-    balance211(NB, nth, ith, begin, end);
+    parallel_for(nth, ith, NB, [&](int begin, int end) {
+      GGML_DISPATCH_QTYPES(TYPE, [&] {
+        const int KB = K / blck_size;
+        const int TILE_SIZE = get_tile_size<type>();
+        const int row_size_A = KB * sizeof(vec_dot_type);
+        for (int i = begin; i < end; ++i) {
+          int nb = i % NB;
+          int nb_start = nb * BLOCK_N;
+          int nb_size = std::min(BLOCK_N, N - nb_start); // 32, 64, 96
 
-    GGML_DISPATCH_QTYPES(TYPE, [&] {
-      const int KB = K / blck_size;
-      const int TILE_SIZE = get_tile_size<type>();
-      const int row_size_A = KB * sizeof(vec_dot_type);
-      for (int i = begin; i < end; ++i) {
-        int nb = i % NB;
-        int nb_start = nb * BLOCK_N;
-        int nb_size = std::min(BLOCK_N, N - nb_start); // 32, 64, 96
-
-        switch (nb_size) {
-          case 96: LAUNCH_TINYGEMM_KERNEL_VNNI(96); break;
-          case 64: LAUNCH_TINYGEMM_KERNEL_VNNI(64); break;
-          case 32: LAUNCH_TINYGEMM_KERNEL_VNNI(32); break;
-          default: fprintf(stderr, "Unexpected n block size!\n");
+          switch (nb_size) {
+            //case 160: LAUNCH_TINYGEMM_KERNEL_VNNI(160); break;
+            case 128: LAUNCH_TINYGEMM_KERNEL_VNNI(128); break;
+            case 96: LAUNCH_TINYGEMM_KERNEL_VNNI(96); break;
+            case 64: LAUNCH_TINYGEMM_KERNEL_VNNI(64); break;
+            case 32: LAUNCH_TINYGEMM_KERNEL_VNNI(32); break;
+            default: fprintf(stderr, "Unexpected n block size!\n");
+          }
         }
-      }
+      });
     });
     return;
   }
@@ -1040,31 +1083,28 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   const int MB = div_up(M, BLOCK_M);
   const int NB = div_up(N, BLOCK_N);
 
-  // TODO: add parallel_for
-  int begin, end;
-  balance211(MB * NB, nth, ith, begin, end);
-  //printf("@@@ amx kernel: MB = %d, NB = %d, begin = %d, end = %d\n", MB, NB, begin, end);
+  parallel_for(nth, ith, MB * NB, [&](int begin, int end) {
+    GGML_DISPATCH_QTYPES(TYPE, [&] {
+      const int KB = K / blck_size;
+      const int TILE_SIZE = get_tile_size<type>();
+      const int row_size_A = KB * sizeof(vec_dot_type);
 
-  GGML_DISPATCH_QTYPES(TYPE, [&] {
-    const int KB = K / blck_size;
-    const int TILE_SIZE = get_tile_size<type>();
-    const int row_size_A = KB * sizeof(vec_dot_type);
+      for (int i = begin; i < end; ++i) {
+        int mb = i / NB;
+        int nb = i % NB;
 
-    for (int i = begin; i < end; ++i) {
-      int mb = i / NB;
-      int nb = i % NB;
+        int mb_start = mb * BLOCK_M;
+        int mb_size = std::min(BLOCK_M, M - mb_start);
+        int nb_start = nb * BLOCK_N;
+        int nb_size = BLOCK_N;
 
-      int mb_start = mb * BLOCK_M;
-      int mb_size = std::min(BLOCK_M, M - mb_start);
-      int nb_start = nb * BLOCK_N;
-      int nb_size = BLOCK_N;
-
-      tinygemm_kernel_amx<vec_dot_type, type, float, blck_size>(
-          mb_size, nb_size, KB,
-          (const char *)wdata + mb_start * row_size_A,
-          (const char *)src0->extra + PACKED_INDEX(nb * 2, 0, KB, TILE_SIZE),
-          (float *) dst->data + mb_start * N + nb_start, ldc);
-    }
+        tinygemm_kernel_amx<vec_dot_type, type, float, blck_size>(
+            mb_size, nb_size, KB,
+            (const char *)wdata + mb_start * row_size_A,
+            (const char *)src0->extra + PACKED_INDEX(nb * 2, 0, KB, TILE_SIZE),
+            (float *) dst->data + mb_start * N + nb_start, ldc);
+      }
+    });
   });
 }
 

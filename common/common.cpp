@@ -71,6 +71,10 @@
 #define LLAMA_CURL_MAX_URL_LENGTH 2084 // Maximum URL Length in Chrome: 2083
 #endif // LLAMA_USE_CURL
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 using json = nlohmann::ordered_json;
 
 //
@@ -1555,6 +1559,9 @@ std::string gpt_params_get_system_info(const gpt_params & params) {
     if (params.n_threads_batch != -1) {
         os << " (n_threads_batch = " << params.n_threads_batch << ")";
     }
+#ifdef _OPENMP
+    os << " (omp_num_threads = " << omp_get_max_threads() << ")";
+#endif
     os << " / " << std::thread::hardware_concurrency() << " | " << llama_print_system_info();
 
     return os.str();
