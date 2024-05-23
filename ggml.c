@@ -12743,7 +12743,7 @@ UseGgmlGemm2:;
         chunks_executed++;
 #endif
 
-        if (nth >= nchunk0 * nchunk1) {
+        if (pr_nth >= nchunk0 * nchunk1) {
             break;
         }
 
