@@ -2,6 +2,7 @@
 *.a
 *.so
 *.gguf
+*.gguf.json
 *.bin
 *.exe
 *.dll
@@ -11,7 +12,10 @@
 *.gcda
 *.dot
 *.bat
+*.tmp
 *.metallib
+*.etag
+*.lastModified
 .DS_Store
 .build/
 .cache/
@@ -23,11 +27,16 @@
 .clang-tidy
 .vs/
 .vscode/
+.idea/
+
+ggml-metal-embed.metal
 
 lcov-report/
 gcovr-report/
 
-build*/
+build*
+!build.zig
+cmake-build-*
 out/
 tmp/
 
@@ -41,16 +50,24 @@ models-mnt
 /convert-llama2c-to-ggml
 /embd-input-test
 /embedding
+/eval-callback
 /gguf
 /gguf-llama-simple
+/gguf-split
+/gritlm
+/imatrix
 /infill
 /libllama.so
 /llama-bench
 /llava-cli
 /lookahead
 /lookup
+/lookup-create
+/lookup-merge
+/lookup-stats
 /main
 /metal
+/passkey
 /perplexity
 /q8dot
 /quantize
@@ -63,6 +80,7 @@ models-mnt
 /batched-bench
 /export-lora
 /finetune
+/retrieval
 /speculative
 /parallel
 /train-text-from-scratch
@@ -84,9 +102,13 @@ qnt-*.txt
 perf-*.txt
 
 examples/jeopardy/results.txt
+examples/server/*.html.hpp
+examples/server/*.js.hpp
+examples/server/*.mjs.hpp
 
 poetry.lock
 poetry.toml
+nppBackup
 
 # Test binaries
 /tests/test-grammar-parser
@@ -97,9 +119,8 @@ poetry.toml
 /tests/test-quantize-fns
 /tests/test-quantize-perf
 /tests/test-sampling
-/tests/test-tokenizer-0-llama
-/tests/test-tokenizer-0-falcon
-/tests/test-tokenizer-1-llama
+/tests/test-tokenizer-0
+/tests/test-tokenizer-1-spm
 /tests/test-tokenizer-1-bpe
 /tests/test-rope
 /tests/test-backend-ops

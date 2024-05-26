@@ -4,12 +4,15 @@
 #
 from __future__ import annotations
 
+import logging
 import os
 from collections import OrderedDict
 from typing import Any, Literal, NamedTuple, TypeVar, Union
 
 import numpy as np
 import numpy.typing as npt
+
+from .quants import quant_shape_to_byte_shape
 
 if __name__ == "__main__":
     import sys
@@ -27,6 +30,7 @@ from gguf.constants import (
     GGUFValueType,
 )
 
+logger = logging.getLogger(__name__)
 
 READER_SUPPORTED_VERSIONS = [2, GGUF_VERSION]
 
@@ -63,7 +67,7 @@ class ReaderTensor(NamedTuple):
 
 class GGUFReader:
     # I - same as host, S - swapped
-    byte_order: Literal['I' | 'S'] = 'I'
+    byte_order: Literal['I'] | Literal['S'] = 'I'
     alignment: int = GGUF_DEFAULT_ALIGNMENT
 
     # Note: Internal helper, API may change.
@@ -81,7 +85,7 @@ class GGUFReader:
         GGUFValueType.BOOL:    np.bool_,
     }
 
-    def __init__(self, path: os.PathLike[str] | str, mode: Literal['r' | 'r+' | 'c'] = 'r'):
+    def __init__(self, path: os.PathLike[str] | str, mode: Literal['r'] | Literal['r+'] | Literal['c'] = 'r'):
         self.data = np.memmap(path, mode = mode)
         offs = 0
         if self._get(offs, np.uint32, override_order = '<')[0] != GGUF_MAGIC:
@@ -107,7 +111,7 @@ class GGUFReader:
         offs, tensors_fields = self._build_tensors_fields(offs, tensor_count)
         new_align = self.fields.get('general.alignment')
         if new_align is not None:
-            if new_align.types != [GGUFValueType.UINT64]:
+            if new_align.types != [GGUFValueType.UINT32]:
                 raise ValueError('Bad type for general.alignment field')
             self.alignment = new_align.parts[-1][0]
         padding = offs % self.alignment
@@ -126,7 +130,7 @@ class GGUFReader:
         return self.tensors[idx]
 
     def _get(
-        self, offset: int, dtype: npt.DTypeLike, count: int = 1, override_order: None | Literal['I' | 'S' | '<'] = None,
+        self, offset: int, dtype: npt.DTypeLike, count: int = 1, override_order: None | Literal['I'] | Literal['S'] | Literal['<'] = None,
     ) -> npt.NDArray[Any]:
         count = int(count)
         itemsize = int(np.empty([], dtype = dtype).itemsize)
@@ -139,8 +143,13 @@ class GGUFReader:
 
     def _push_field(self, field: ReaderField, skip_sum: bool = False) -> int:
         if field.name in self.fields:
-            raise KeyError(f'Duplicate {field.name} already in list at offset {field.offset}')
-        self.fields[field.name] = field
+            # TODO: add option to generate error on duplicate keys
+            # raise KeyError(f'Duplicate {field.name} already in list at offset {field.offset}')
+
+            logger.warning(f'Duplicate key {field.name} at offset {field.offset}')
+            self.fields[field.name + '_{}'.format(field.offset)] = field
+        else:
+            self.fields[field.name] = field
         return 0 if skip_sum else sum(int(part.nbytes) for part in field.parts)
 
     def _get_str(self, offset: int) -> tuple[npt.NDArray[np.uint64], npt.NDArray[np.uint8]]:
@@ -234,31 +243,54 @@ class GGUFReader:
 
     def _build_tensors(self, start_offs: int, fields: list[ReaderField]) -> None:
         tensors = []
+        tensor_names = set() # keep track of name to prevent duplicated tensors
         for field in fields:
             _name_len, name_data, _n_dims, dims, raw_dtype, offset_tensor = field.parts
+            # check if there's any tensor having same name already in the list
+            tensor_name = str(bytes(name_data), encoding = 'utf-8')
+            if tensor_name in tensor_names:
+                raise ValueError(f'Found duplicated tensor with name {tensor_name}')
+            tensor_names.add(tensor_name)
             ggml_type = GGMLQuantizationType(raw_dtype[0])
-            n_elems = np.prod(dims)
+            n_elems = int(np.prod(dims))
+            np_dims = tuple(reversed(dims.tolist()))
             block_size, type_size = GGML_QUANT_SIZES[ggml_type]
             n_bytes = n_elems * type_size // block_size
             data_offs = int(start_offs + offset_tensor[0])
             item_type: npt.DTypeLike
-            if ggml_type == GGMLQuantizationType.F32:
-                item_count = n_elems
-                item_type = np.float32
-            elif ggml_type == GGMLQuantizationType.F16:
+            if ggml_type == GGMLQuantizationType.F16:
                 item_count = n_elems
                 item_type = np.float16
+            elif ggml_type == GGMLQuantizationType.F32:
+                item_count = n_elems
+                item_type = np.float32
+            elif ggml_type == GGMLQuantizationType.F64:
+                item_count = n_elems
+                item_type = np.float64
+            elif ggml_type == GGMLQuantizationType.I8:
+                item_count = n_elems
+                item_type = np.int8
+            elif ggml_type == GGMLQuantizationType.I16:
+                item_count = n_elems
+                item_type = np.int16
+            elif ggml_type == GGMLQuantizationType.I32:
+                item_count = n_elems
+                item_type = np.int32
+            elif ggml_type == GGMLQuantizationType.I64:
+                item_count = n_elems
+                item_type = np.int64
             else:
                 item_count = n_bytes
                 item_type = np.uint8
+                np_dims = quant_shape_to_byte_shape(np_dims, ggml_type)
             tensors.append(ReaderTensor(
-                name = str(bytes(name_data), encoding = 'utf-8'),
+                name = tensor_name,
                 tensor_type = ggml_type,
                 shape = dims,
                 n_elements = n_elems,
                 n_bytes = n_bytes,
                 data_offset = data_offs,
-                data = self._get(data_offs, item_type, item_count),
+                data = self._get(data_offs, item_type, item_count).reshape(np_dims),
                 field = field,
             ))
         self.tensors = tensors
