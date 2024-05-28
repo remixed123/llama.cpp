@@ -72,6 +72,7 @@ else()
     set(INS_ENB ON)
 endif()
 
+option(LLAMA_SVE                             "llama: enable SVE"                                OFF)
 option(LLAMA_AVX                             "llama: enable AVX"                                ${INS_ENB})
 option(LLAMA_AVX2                            "llama: enable AVX2"                               ${INS_ENB})
 option(LLAMA_AVX512                          "llama: enable AVX512"                             OFF)
@@ -124,7 +125,6 @@ set(LLAMA_METAL_MACOSX_VERSION_MIN "" CACHE STRING
 set(LLAMA_METAL_STD "" CACHE STRING          "llama: metal standard version (-std flag)")
 option(LLAMA_KOMPUTE                         "llama: use Kompute"                               OFF)
 option(LLAMA_RPC                             "llama: use RPC"                                   OFF)
-option(LLAMA_QKK_64                          "llama: use super-block size of 64 for k-quants"   OFF)
 option(LLAMA_SYCL                            "llama: use SYCL"                                  OFF)
 option(LLAMA_SYCL_F16                        "llama: use 16 bit floats for sycl calculations"   OFF)
 set(LLAMA_SYCL_TARGET   "INTEL" CACHE STRING "llama: sycl target device")
@@ -382,10 +382,6 @@ if (LLAMA_LLAMAFILE)
 
     set(GGML_HEADERS_LLAMAFILE sgemm.h)
     set(GGML_SOURCES_LLAMAFILE sgemm.cpp)
-endif()
-
-if (LLAMA_QKK_64)
-    add_compile_definitions(GGML_QKK_64)
 endif()
 
 if (LLAMA_CUBLAS)
@@ -1044,6 +1040,9 @@ if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM_LWR STR
             # Android arm64-v8a
             # Raspberry Pi 3, 4, Zero 2 (32-bit)
             list(APPEND ARCH_FLAGS -mno-unaligned-access)
+        endif()
+        if (LLAMA_SVE)
+            list(APPEND ARCH_FLAGS -march=armv8.6-a+sve)
         endif()
     endif()
 elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR MATCHES "^(x86_64|i686|amd64|x64|win32)$" OR

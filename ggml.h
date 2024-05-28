@@ -481,9 +481,7 @@ extern "C" {
         GGML_OP_ARGSORT,
         GGML_OP_LEAKY_RELU,
 
-        GGML_OP_FLASH_ATTN,
         GGML_OP_FLASH_ATTN_EXT,
-        GGML_OP_FLASH_FF,
         GGML_OP_FLASH_ATTN_BACK,
         GGML_OP_SSM_CONV,
         GGML_OP_SSM_SCAN,
@@ -1009,12 +1007,13 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
-    // concat a and b on dim 2
+    // concat a and b along dim
     // used in stable-diffusion
     GGML_API struct ggml_tensor * ggml_concat(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
-            struct ggml_tensor  * b);
+            struct ggml_tensor  * b,
+            int                   dim);
 
     GGML_API struct ggml_tensor * ggml_abs(
             struct ggml_context * ctx,
@@ -1761,13 +1760,6 @@ extern "C" {
             struct ggml_tensor  * a,
             int                   k);
 
-    GGML_API struct ggml_tensor * ggml_flash_attn(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * q,
-            struct ggml_tensor  * k,
-            struct ggml_tensor  * v,
-            bool                  masked);
-
 #define GGML_KQ_MASK_PAD 32
 
     // q:    [n_embd, n_batch,     n_head,    1]
@@ -1788,6 +1780,7 @@ extern "C" {
             struct ggml_tensor * a,
             enum ggml_prec       prec);
 
+    // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
            struct ggml_context * ctx,
            struct ggml_tensor  * q,
@@ -1795,14 +1788,6 @@ extern "C" {
            struct ggml_tensor  * v,
            struct ggml_tensor  * d,
            bool                  masked);
-
-    GGML_API struct ggml_tensor * ggml_flash_ff(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * a,
-            struct ggml_tensor  * b0,
-            struct ggml_tensor  * b1,
-            struct ggml_tensor  * c0,
-            struct ggml_tensor  * c1);
 
     GGML_API struct ggml_tensor * ggml_ssm_conv(
             struct ggml_context * ctx,
@@ -2420,6 +2405,7 @@ extern "C" {
     GGML_API int ggml_cpu_has_avx512_bf16(void);
     GGML_API int ggml_cpu_has_fma        (void);
     GGML_API int ggml_cpu_has_neon       (void);
+    GGML_API int ggml_cpu_has_sve        (void);
     GGML_API int ggml_cpu_has_arm_fma    (void);
     GGML_API int ggml_cpu_has_metal      (void);
     GGML_API int ggml_cpu_has_f16c       (void);
