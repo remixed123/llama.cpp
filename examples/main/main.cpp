@@ -755,18 +755,16 @@ int main(int argc, char ** argv) {
             for (auto id : embd) {
                 const std::string token_str = llama_token_to_piece(ctx, id, params.special);
 
+                // Console/Stream Output
                 // Suppress printing while generating token healing prefix
                 if (n_bytes_to_skip > 0 && n_bytes_to_skip < (int)token_str.size()) {
-                    printf("%s", token_str.substr(n_bytes_to_skip).c_str());
+                    fprintf(stdout, "%s", token_str.substr(n_bytes_to_skip).c_str());
                     n_bytes_to_skip = 0;
                 } else if (n_bytes_to_skip > 0) {
                     n_bytes_to_skip -= token_str.size();
                 } else {
-                    printf("%s", token_str.c_str());
+                    fprintf(stdout, "%s", token_str.c_str());
                 }
-
-                // Console/Stream Output
-                fprintf(stdout, "%s", token_str.c_str());
 
                 // Record Displayed Tokens To Log
                 // Note: Generated tokens are created one by one hence this check
