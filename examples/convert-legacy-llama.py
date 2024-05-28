@@ -353,7 +353,7 @@ class Metadata:
     version: Optional[str] = None
     url: Optional[str] = None
     description: Optional[str] = None
-    licence: Optional[str] = None
+    license: Optional[str] = None
     source_url: Optional[str] = None
     source_hf_repo: Optional[str] = None
 
@@ -827,8 +827,8 @@ class OutputFile:
                 self.gguf.add_url(metadata.url)
             if metadata.description is not None:
                 self.gguf.add_description(metadata.description)
-            if metadata.licence is not None:
-                self.gguf.add_licence(metadata.licence)
+            if metadata.license is not None:
+                self.gguf.add_license(metadata.license)
             if metadata.source_url is not None:
                 self.gguf.add_source_url(metadata.source_url)
             if metadata.source_hf_repo is not None:
