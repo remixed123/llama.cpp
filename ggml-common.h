@@ -52,6 +52,10 @@ typedef sycl::half2 ggml_half2;
 
 #if defined(GGML_COMMON_DECL)
 
+#ifdef _WIN32
+#include <assert.h>
+#endif
+
 #ifndef __cplusplus
 #ifndef static_assert
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201100L)
