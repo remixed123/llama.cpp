@@ -55,6 +55,8 @@ inline T div_up(T x, T y) { return (x + y - 1) / y; }
 
 template <typename T>
 void balance211(T n, T nth, T ith, T& n_start, T& n_end) {
+#if 0
+  // onednn partition pattern
   T& n_my = n_end;
   if (nth <= 1 || n == 0) {
     n_start = 0;
@@ -67,6 +69,12 @@ void balance211(T n, T nth, T ith, T& n_start, T& n_end) {
     n_start = ith <= T1 ? ith*n1 : T1 * n1 + (ith - T1) * n2;
   }
   n_end += n_start;
+#else
+  // pytorch aten partition pattern
+  T n_my = div_up(n, nth);
+  n_start = ith * n_my;
+  n_end = std::min(n_start + n_my, n);
+#endif
 }
 
 // parallel with openmp, if openmp is not enabled, go sequential
