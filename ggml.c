@@ -136,7 +136,11 @@ typedef pthread_t ggml_thread_t;
 
 #include <omp.h>
 #define GGML_PARALLEL_BEGIN(nth, ith)             \
-    GGML_ASSERT(nth == 1 && ith == 0);            \
+    if (nth != 1 || ith != 0) {                   \
+        GGML_PRINT("Nested parallelism not allowed, please set -t|--threads to 1 when OpenMP is compiled!" \
+                   " And control openmp threads by setting OMP_NUM_THREADS environment variable.\n"); \
+        GGML_ASSERT(false);                       \
+    }                                             \
     PRAGMA_MACRO(omp parallel) {                  \
     const int64_t pr_nth = omp_get_num_threads(); \
     const int64_t pr_ith = omp_get_thread_num();

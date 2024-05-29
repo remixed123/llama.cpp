@@ -101,7 +101,11 @@ template <typename func_t>
 inline void parallel_for(int nth, int ith, int n, const func_t& f) {
 #if defined(_OPENMP)
   // forbid nested parallelism of pthread and openmp
-  GGML_ASSERT(nth == 1 && ith == 0);
+  if (nth != 1 || ith != 0) {
+    printf("Nested parallelism not allowed, please set -t|--threads to 1 when OpenMP is compiled!"
+           " And control openmp threads by setting OMP_NUM_THREADS environment variable.\n");
+    GGML_ASSERT(false);
+  }
   parallel_for(n, f);
 #else
   int tbegin, tend;
