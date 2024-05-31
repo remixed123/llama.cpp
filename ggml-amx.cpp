@@ -257,7 +257,6 @@ struct tile_config_t{
 
 #define TC_CONFIG_TILE(i, r, cb) tc.rows[i] = r; tc.colsb[i] = cb
 void ggml_tile_config_init(void) {
-  // TODO: try remove _tile_storeconfig ??
   static thread_local tile_config_t tc;
   tile_config_t current_tc;
   _tile_storeconfig(&current_tc);
@@ -276,7 +275,6 @@ void ggml_tile_config_init(void) {
     TC_CONFIG_TILE(TMM6, 16, 64);
     TC_CONFIG_TILE(TMM7, 16, 64);
     _tile_loadconfig(&tc);
-    //printf("### ggml_tile_config_init finished!\n");
   }
 }
 
@@ -510,32 +508,6 @@ struct acc_C<block_q8_0, block_q4_0, is_acc> {
   }
 };
 
-static void print_512(const __m512 _x)
-{
-    __attribute__((aligned(32)))
-    float a[16];
-    _mm512_storeu_ps(a, _x);
-
-    for (int i = 0; i < 16; i++)
-    {
-        printf("%.5f ", a[i]);
-    }
-    printf("\n");
-}
-
-static void print_512i(const __m512i _x)
-{
-    __attribute__((aligned(32)))
-    int32_t a[16];
-    _mm512_store_si512(a, _x);
-
-    for (int i = 0; i < 16; i++)
-    {
-        printf("%4d ", a[i]);
-    }
-    printf("\n");
-}
-
 template <bool is_acc>
 struct acc_C<block_q8_1, block_q4_1, is_acc> {
   static void apply(float * RESTRICT C, int ldc, const int32_t * RESTRICT tile, const block_q8_1 * A, int lda, const void * packed_B, int nr) {
@@ -592,7 +564,6 @@ void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, in
   const int KB = K / BLOCK_K;
   const int TILE_SIZE = get_tile_size<TB>();
 
-  //printf("### convert_B_packed_format: NB = %d, KB = %d, tile_size = %d\n", NB, KB, TILE_SIZE);
   // parallel on NB should be enough
   parallel_for(NB, [&](int begin, int end) {
     for (int n = begin; n < end; ++n) {
@@ -604,14 +575,12 @@ void convert_B_packed_format(void * RESTRICT packed_B, const TB * RESTRICT B, in
   });
 }
 
-// TODO: remove `BLOCK_K` ?
 template <typename TA, typename TB, typename TC, int BLOCK_M, int BLOCK_N, int BLOCK_K>
 struct tinygemm_kernel_vnni {};
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
 struct tinygemm_kernel_vnni<block_q8_0, block_q4_0, float, BLOCK_M, BLOCK_N, BLOCK_K> {
   static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
-    //printf("### tinygemm_kernel_vnni - q4_0, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", BLOCK_M, BLOCK_N, BLOCK_K);
 
     constexpr int COLS = BLOCK_N / 16;
     const int TILE_SIZE = TILE_N * sizeof(block_q4_0);
@@ -684,7 +653,6 @@ struct tinygemm_kernel_vnni<block_q8_0, block_q4_0, float, BLOCK_M, BLOCK_N, BLO
 template <int BLOCK_N, int BLOCK_K>
 struct tinygemm_kernel_vnni<block_q8_1, block_q4_1, float, 1, BLOCK_N, BLOCK_K> {
   static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
-    //printf("### tinygemm_kernel_vnni - q4_1, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", 1, BLOCK_N, BLOCK_K);
 
     constexpr int COLS = BLOCK_N / 16;
     const int TILE_SIZE = TILE_N * sizeof(block_q4_1);
@@ -750,7 +718,6 @@ struct tinygemm_kernel_vnni<block_q8_1, block_q4_1, float, 1, BLOCK_N, BLOCK_K> 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
 struct tinygemm_kernel_vnni<block_q8_0, block_q8_0, float, BLOCK_M, BLOCK_N, BLOCK_K> {
   static void apply(int KB, const void * RESTRICT _A, const void * RESTRICT _B, float * RESTRICT C, int ldc) {
-    //printf("### tinygemm_kernel_vnni - q8_0, BLOCK_M = %d, BLOCK_N = %d, BLOCK_K = %d\n", BLOCK_M, BLOCK_N, BLOCK_K);
 
     constexpr int COLS = BLOCK_N / 16;
     const int TILE_SIZE = TILE_N * sizeof(block_q8_0) + TILE_N * sizeof(int32_t);
@@ -825,7 +792,6 @@ struct tinygemm_kernel_vnni<block_q8_0, block_q8_0, float, BLOCK_M, BLOCK_N, BLO
         (const char *)src0->extra + PACKED_INDEX(nb * kTilesN, 0, KB, TILE_SIZE),    \
         (float *) dst->data + 0 * N + nb_start, ldc)
 
-// TODO: remove `BLOCK_K` ?
 template <typename TA, typename TB, typename TC, int BLOCK_K>
 void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const void * RESTRICT _B, TC * RESTRICT C, int ldc) {
   using packed_B_t = packed_B_type<TB>;
@@ -1007,15 +973,6 @@ void tinygemm_kernel_amx(int M, int N, int KB, const void * RESTRICT _A, const v
 #define XFEATURE_XTILECFG       17
 #define XFEATURE_XTILEDATA      18
 
-void print_C(float * dst, int64_t nrows, int64_t ncols) {
-  for (int m = 0; m < nrows; ++m) {
-    for (int n = 0; n < ncols; ++n) {
-      printf(" %.3f", dst[m * ncols + n]);
-    }
-    printf("\n");
-  }
-}
-
 bool ggml_amx_init() {
 #if defined(__gnu_linux__)
   if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)) {
@@ -1116,7 +1073,7 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   GGML_ASSERT(src0->extra != nullptr);
 
   if (M == 1) {
-    // MB = 1 and handle 4 tiles in each block
+    // MB = 1 and handle 8 tiles in each block
     constexpr int kTilesN = 8;
     constexpr int BLOCK_N = TILE_N * kTilesN;
     const int NB = div_up(N, BLOCK_N);

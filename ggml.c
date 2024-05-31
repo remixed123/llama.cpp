@@ -12488,14 +12488,6 @@ static void ggml_compute_forward_mul_mat(
     // nb01 >= nb00 - src0 is not transposed
     //   compute by src0 rows
 
-    if (params->type == GGML_TASK_TYPE_INIT) {
-        //printf("\n### GGML_TASK_TYPE_INIT\n");
-    } else if (params->type == GGML_TASK_TYPE_COMPUTE) {
-        //printf("\n### GGML_TASK_TYPE_COMPUTE\n");
-    } else if (params->type == GGML_TASK_TYPE_FINALIZE) {
-        //printf("\n### GGML_TASK_TYPE_FINALIZE\n");
-    }
-
 #if defined(GGML_USE_CLBLAST)
     if (ggml_cl_can_mul_mat(src0, src1, dst)) {
         if (params->ith == 0 && params->type == GGML_TASK_TYPE_COMPUTE) {
@@ -12506,27 +12498,9 @@ static void ggml_compute_forward_mul_mat(
 #endif
 
 #if GGML_USE_AMX
-    //float* dst_copy = (float*)malloc(ne1 * ne0 * sizeof(float));
     if (ggml_compute_forward_mul_mat_use_amx(dst) && ggml_amx_initialized) {
-
         ggml_mul_mat_amx(params, dst);
-#if 0
-        sleep(1);
-        if (ith == 0) {
-            //printf("\n### amx result: \n");
-            //print_C((float*)(dst->data), ne1, ne0);
-            float* dst_ptr = (float*)(dst->data);
-            for (int m = 0; m < ne1; m++) {
-                for (int n = 0; n < ne0; n++) {
-                    dst_copy[m * ne0 + n] = dst_ptr[m * ne0 + n];
-                    dst_ptr[m * ne0 + n] = 0;
-                }
-            }
-        }
-        sleep(1);
-#else
         return;
-#endif
     }
 #endif
 
