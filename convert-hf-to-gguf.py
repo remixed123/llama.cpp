@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import frontmatter
 from enum import IntEnum
 from pathlib import Path
 from hashlib import sha256
@@ -96,6 +97,7 @@ class Model:
     lazy: bool
     part_names: list[str]
     is_safetensors: bool
+    model_card: dict[str, Any]
     hparams: dict[str, Any]
     block_count: int
     tensor_map: gguf.TensorNameMap
@@ -122,6 +124,7 @@ class Model:
         self.is_safetensors = len(self.part_names) > 0
         if not self.is_safetensors:
             self.part_names = Model.get_model_part_names(self.dir_model, "pytorch_model", ".bin")
+        self.model_card = Model.load_model_card(dir_model)
         self.hparams = Model.load_hparams(self.dir_model)
         self.block_count = self.find_hparam(["n_layers", "num_hidden_layers", "n_layer"])
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
@@ -140,10 +143,18 @@ class Model:
                 logger.info(f"choosing --outtype bf16 from first tensor type ({first_tensor.dtype})")
                 self.ftype = gguf.LlamaFileType.MOSTLY_BF16
 
-        # Update any missing authorship metadata with huggingface_parameters
-        if self.metadata is not None and self.metadata.source_hf_repo is None:
-            if self.hparams is not None and "_name_or_path" in self.hparams:
-                self.metadata.source_hf_repo = self.hparams["_name_or_path"]
+        # Update any missing authorship metadata with HuggingFace parameters or model card frontmatter
+        if self.metadata is not None:
+
+            # Source Hugging Face Repository
+            if self.metadata.source_hf_repo is None:
+                if self.hparams is not None and "_name_or_path" in self.hparams:
+                    self.metadata.source_hf_repo = self.hparams["_name_or_path"]
+
+            # Model License
+            if self.metadata.license is None:
+                if self.model_card is not None and "license" in self.model_card:
+                    self.metadata.source_hf_repo = self.model_card["license"]
 
         # Set model name based on latest metadata either provided or calculated from environment
         def get_model_name(metadata, huggingface_parameters, dir_model, model_arch):
@@ -488,6 +499,11 @@ class Model:
         part_names.sort()
 
         return part_names
+
+    @staticmethod
+    def load_model_card(dir_model: Path):
+        with open(dir_model / "README.md", "r", encoding="utf-8") as f:
+            return frontmatter.load(f)
 
     @staticmethod
     def load_hparams(dir_model: Path):
