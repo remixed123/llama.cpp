@@ -2880,9 +2880,10 @@ def main() -> None:
     else:
         logging.basicConfig(level=logging.INFO)
 
+    model_name = args.model_name
     dir_model = args.model
 
-    metadata = gguf.Metadata.load(args.metadata, dir_model)
+    metadata = gguf.Metadata.load(args.metadata, dir_model, model_name)
 
     if args.awq_path:
         sys.path.insert(1, str(Path(__file__).parent / 'awq-py'))
