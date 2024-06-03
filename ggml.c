@@ -41,8 +41,16 @@
 #undef GGML_USE_LLAMAFILE
 #endif
 
+#ifndef __AMX_INT8__
+#undef GGML_USE_AMX
+#endif
+
 #ifdef GGML_USE_LLAMAFILE
 #include "sgemm.h"
+#endif
+
+#ifdef GGML_USE_AMX
+#include "ggml-amx.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -127,6 +135,36 @@ typedef void * thread_ret_t;
 #endif
 
 typedef pthread_t ggml_thread_t;
+
+#ifdef _WIN32
+#define PRAGMA_MACRo(x) __pragma(x)
+#define PRAGMA_MACRO(x) PRAGMA_MACRo(x)
+#else
+#define PRAGMA_MACRo(x) _Pragma(#x)
+#define PRAGMA_MACRO(x) PRAGMA_MACRo(x)
+#endif
+
+#ifdef _OPENMP
+// goto is not allowed in omp loops
+#undef GGML_USE_LLAMAFILE
+
+#include <omp.h>
+#define GGML_PARALLEL_BEGIN(nth, ith)             \
+    if (nth != 1 || ith != 0) {                   \
+        GGML_PRINT("Nested parallelism not allowed, please set -t|--threads to 1 when OpenMP is compiled!" \
+                   " And control openmp threads by setting OMP_NUM_THREADS environment variable.\n"); \
+        GGML_ASSERT(false);                       \
+    }                                             \
+    PRAGMA_MACRO(omp parallel) {                  \
+    const int64_t pr_nth = omp_get_num_threads(); \
+    const int64_t pr_ith = omp_get_thread_num();
+#define GGML_PARALLEL_END   }
+#else
+#define GGML_PARALLEL_BEGIN(nth, ith)             \
+    const int64_t pr_nth = nth;                   \
+    const int64_t pr_ith = ith;
+#define GGML_PARALLEL_END
+#endif
 
 #ifdef GGML_USE_CPU_HBM
 #include <hbwmalloc.h>
@@ -331,6 +369,11 @@ static ggml_fp16_t ggml_table_gelu_quick_f16[1 << 16];
 
 // precomputed f32 table for f16 (256 KB) (ggml-impl.h)
 float ggml_table_f32_f16[1 << 16];
+
+#if GGML_USE_AMX
+// global flag for amx init
+static bool ggml_amx_initialized = false;
+#endif
 
 GGML_CALL const char * ggml_status_to_string(enum ggml_status status) {
     switch (status) {
@@ -3377,6 +3420,10 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
 
 #if defined(GGML_USE_CLBLAST)
         ggml_cl_init();
+#endif
+
+#if GGML_USE_AMX
+        ggml_amx_initialized = ggml_amx_init();
 #endif
 
         ggml_setup_op_has_task_pass();
@@ -12421,6 +12468,13 @@ static void ggml_compute_forward_mul_mat(
     }
 #endif
 
+#if GGML_USE_AMX
+    if (ggml_compute_forward_mul_mat_use_amx(dst) && ggml_amx_initialized) {
+        ggml_mul_mat_amx(params, dst);
+        return;
+    }
+#endif
+
 #if defined(GGML_USE_ACCELERATE) || defined(GGML_USE_OPENBLAS)
     if (ggml_compute_forward_mul_mat_use_blas(dst)) {
         const int64_t ne_plane      = ne01*ne00;
@@ -12441,9 +12495,11 @@ static void ggml_compute_forward_mul_mat(
                               float          * const wdata    = (float *) params->wdata + i13*ne12*ne_plane + i12*ne_plane;
                               ggml_to_float_t  const to_float = type_traits[type].to_float;
 
-                        for (int64_t i01 = ith; i01 < ne01; i01 += nth) {
+                        GGML_PARALLEL_BEGIN(nth, ith);
+                        for (int64_t i01 = pr_ith; i01 < ne01; i01 += pr_nth) {
                             to_float((const char *) x + i01*nb01, wdata + i01*ne00, ne00);
                         }
+                        GGML_PARALLEL_END;
                     }
                 }
             }
@@ -12572,6 +12628,7 @@ UseGgmlGemm2:;
     UNUSED(chunks_executed);
 #endif
 
+    GGML_PARALLEL_BEGIN(nth, ith);
     // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
     const int64_t nr0 = ne0;
 
@@ -12603,10 +12660,10 @@ UseGgmlGemm2:;
     // If the chunking is poor for the number of threads on this setup, scrap the whole plan.  Re-chunk it by thread.
     //   Also, chunking by thread was measured to have perform better on NUMA systems.  See https://github.com/ggerganov/llama.cpp/pull/6915
     //   In theory, chunking should be just as useful on NUMA and non NUMA systems, but testing disagreed with that.
-    if (nchunk0 * nchunk1 < nth * 4 || ggml_is_numa()) {
+    if (nchunk0 * nchunk1 < pr_nth * 4 || ggml_is_numa()) {
         // distribute the thread work across the inner or outer loop based on which one is larger
-        nchunk0 = nr0 > nr1 ? nth : 1; // parallelize by src0 rows
-        nchunk1 = nr0 > nr1 ? 1 : nth; // parallelize by src1 rows
+        nchunk0 = nr0 > nr1 ? pr_nth : 1; // parallelize by src0 rows
+        nchunk1 = nr0 > nr1 ? 1 : pr_nth; // parallelize by src1 rows
     }
 
     // The number of elements in each chunk
@@ -12617,7 +12674,7 @@ UseGgmlGemm2:;
     //    printf("MUL_MAT = [%d, %d, %d, %d] x [%d, %d, %d, %d] = %d x %d = %d.  Fp Ops/Ch %d\n", ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13, nchunk0, nchunk1, nchunk0 * nchunk1, ne00 * nr0 * nr1 / nchunk0 / nchunk1);
 
     // The first chunk comes from our thread_id, the rest will get auto-assigned.
-    int current_chunk = ith;
+    int current_chunk = pr_ith;
 
     while (current_chunk < nchunk0 * nchunk1) {
         const int64_t ith0 = current_chunk % nchunk0;
@@ -12635,12 +12692,13 @@ UseGgmlGemm2:;
         chunks_executed++;
 #endif
 
-        if (nth >= nchunk0 * nchunk1) {
+        if (pr_nth >= nchunk0 * nchunk1) {
             break;
         }
 
         current_chunk = atomic_fetch_add(&state->shared->current_chunk, 1);
     }
+    GGML_PARALLEL_END;
 
 #ifdef GGML_PERF
     // These numbers are useful when trying to measure how well the threading scheduling works.
@@ -22781,6 +22839,14 @@ int ggml_cpu_has_avx512_vnni(void) {
 
 int ggml_cpu_has_avx512_bf16(void) {
 #if defined(__AVX512BF16__)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int ggml_cpu_has_amx_int8(void) {
+#if defined(__AMX_INT8__)
     return 1;
 #else
     return 0;
