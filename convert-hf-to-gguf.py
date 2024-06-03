@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
-import logging
 import argparse
 import contextlib
 import json
+import logging
+import math
 import os
 import re
 import sys
-from enum import IntEnum
-from pathlib import Path
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterable, Iterator, Sequence, TypeVar, cast
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ContextManager,
+    Iterable,
+    Iterator,
+    Sequence,
+    TypeVar,
+    cast,
+)
 
-import math
 import numpy as np
 import torch
 
@@ -22,23 +31,13 @@ if TYPE_CHECKING:
     from torch import Tensor
 
 if 'NO_LOCAL_GGUF' not in os.environ:
-    sys.path.insert(1, str(Path(__file__).parent / 'gguf-py'))
+    sys.path.insert(1, str(Path('gguf-py')))
 import gguf
 
 logger = logging.getLogger("hf-to-gguf")
 
 
 ###### MODEL DEFINITIONS ######
-
-class SentencePieceTokenTypes(IntEnum):
-    NORMAL = 1
-    UNKNOWN = 2
-    CONTROL = 3
-    USER_DEFINED = 4
-    UNUSED = 5
-    BYTE = 6
-
-
 AnyModel = TypeVar("AnyModel", bound="type[Model]")
 
 
@@ -406,94 +405,43 @@ class Model:
         # is specific for the BPE pre-tokenizer used by the model
         # we will use this unique identifier to write a "tokenizer.ggml.pre" entry in the GGUF file which we can
         # use in llama.cpp to implement the same pre-tokenizer
+        checksum = sha256(str(tokenizer.vocab).encode()).hexdigest()
+        logger.debug(f"checksum: {checksum}")
 
-        chktxt = '\n \n\n \n\n\n \t \t\t \t\n  \n   \n    \n     \n🚀 (normal) 😶\u200d🌫️ (multiple emojis concatenated) ✅ 🦙🦙 3 33 333 3333 33333 333333 3333333 33333333 3.3 3..3 3...3 កាន់តែពិសេសអាច😁 ?我想在apple工作1314151天～ ------======= нещо на Български \'\'\'\'\'\'```````""""......!!!!!!?????? I\'ve been \'told he\'s there, \'RE you sure? \'M not sure I\'ll make it, \'D you like some tea? We\'Ve a\'lL'
+        # NOTE: IF you get an error here:
+        #       Update the huggingface_hub.py module and add the vocab, model, and repo.
+        #       Run the `gguf-py/scripts/gguf-gen-pre.py` script to generate the checksums.
+        #       This script should ideally pull in the latest version of the model from HuggingFace.
+        #       DO NOT MANUALLY EDIT THIS METHOD!
+        models = json.load(f"{tokenizer.name_or_path}/checksums.json")
+        for model in models:
+            if checksum == model["checksum"]:
+                pre = None
+                if model["tokt"] == gguf.TokenizerType.BPE:
+                    pre = "bpe"
+                elif model["tokt"] == gguf.TokenizerType.SPM:
+                    pre = "spm"
+                elif model["tokt"] == gguf.TokenizerType.WPM:
+                    pre = "wpm"
+                else:
+                    raise KeyError()
+                logger.debug(f"tokenizer checksum: {checksum}")
+                logger.debug(f"tokenizer.ggml.pre: {pre}")
+                return pre  # NOTE: Use the enum to id the vocab
 
-        chktok = tokenizer.encode(chktxt)
-        chkhsh = sha256(str(chktok).encode()).hexdigest()
-
-        logger.debug(f"chktok: {chktok}")
-        logger.debug(f"chkhsh: {chkhsh}")
-
-        res = None
-
-        # NOTE: if you get an error here, you need to update the convert-hf-to-gguf-update.py script
-        #       or pull the latest version of the model from Huggingface
-        #       don't edit the hashes manually!
-        if chkhsh == "0ef9807a4087ebef797fc749390439009c3b9eda9ad1a097abbe738f486c01e5":
-            # ref: https://huggingface.co/meta-llama/Meta-Llama-3-8B
-            res = "llama-bpe"
-        if chkhsh == "049ecf7629871e3041641907f3de7c733e4dbfdc736f57d882ba0b0845599754":
-            # ref: https://huggingface.co/deepseek-ai/deepseek-llm-7b-base
-            res = "deepseek-llm"
-        if chkhsh == "347715f544604f9118bb75ed199f68779f423cabb20db6de6f31b908d04d7821":
-            # ref: https://huggingface.co/deepseek-ai/deepseek-coder-6.7b-base
-            res = "deepseek-coder"
-        if chkhsh == "8aeee3860c56296a157a1fe2fad249ec40aa59b1bb5709f4ade11c4e6fe652ed":
-            # ref: https://huggingface.co/tiiuae/falcon-7b
-            res = "falcon"
-        if chkhsh == "0876d13b50744004aa9aeae05e7b0647eac9d801b5ba4668afc01e709c15e19f":
-            # ref: https://huggingface.co/BAAI/bge-small-en-v1.5
-            res = "bert-bge"
-        if chkhsh == "b6dc8df998e1cfbdc4eac8243701a65afe638679230920b50d6f17d81c098166":
-            # ref: https://huggingface.co/mosaicml/mpt-7b
-            res = "mpt"
-        if chkhsh == "35d91631860c815f952d711435f48d356ebac988362536bed955d43bfa436e34":
-            # ref: https://huggingface.co/bigcode/starcoder2-3b
-            res = "starcoder"
-        if chkhsh == "3ce83efda5659b07b1ad37ca97ca5797ea4285d9b9ab0dc679e4a720c9da7454":
-            # ref: https://huggingface.co/openai-community/gpt2
-            res = "gpt-2"
-        if chkhsh == "32d85c31273f8019248f2559fed492d929ea28b17e51d81d3bb36fff23ca72b3":
-            # ref: https://huggingface.co/stabilityai/stablelm-2-zephyr-1_6b
-            res = "stablelm2"
-        if chkhsh == "6221ad2852e85ce96f791f476e0b390cf9b474c9e3d1362f53a24a06dc8220ff":
-            # ref: https://huggingface.co/smallcloudai/Refact-1_6-base
-            res = "refact"
-        if chkhsh == "9c2227e4dd922002fb81bde4fc02b0483ca4f12911410dee2255e4987644e3f8":
-            # ref: https://huggingface.co/CohereForAI/c4ai-command-r-v01
-            res = "command-r"
-        if chkhsh == "e636dc30a262dcc0d8c323492e32ae2b70728f4df7dfe9737d9f920a282b8aea":
-            # ref: https://huggingface.co/Qwen/Qwen1.5-7B
-            res = "qwen2"
-        if chkhsh == "b6dc8df998e1cfbdc4eac8243701a65afe638679230920b50d6f17d81c098166":
-            # ref: https://huggingface.co/allenai/OLMo-1.7-7B-hf
-            res = "olmo"
-        if chkhsh == "a8594e3edff7c29c003940395316294b2c623e09894deebbc65f33f1515df79e":
-            # ref: https://huggingface.co/databricks/dbrx-base
-            res = "dbrx"
-        if chkhsh == "0876d13b50744004aa9aeae05e7b0647eac9d801b5ba4668afc01e709c15e19f":
-            # ref: https://huggingface.co/jinaai/jina-embeddings-v2-base-en
-            res = "jina-v2-en"
-        if chkhsh == "171aeeedd6fb548d418a7461d053f11b6f1f1fc9b387bd66640d28a4b9f5c643":
-            # ref: https://huggingface.co/jinaai/jina-embeddings-v2-base-es
-            res = "jina-v2-es"
-        if chkhsh == "27949a2493fc4a9f53f5b9b029c82689cfbe5d3a1929bb25e043089e28466de6":
-            # ref: https://huggingface.co/jinaai/jina-embeddings-v2-base-de
-            res = "jina-v2-de"
-        if chkhsh == "c136ed14d01c2745d4f60a9596ae66800e2b61fa45643e72436041855ad4089d":
-            # ref: https://huggingface.co/abacusai/Smaug-Llama-3-70B-Instruct
-            res = "smaug-bpe"
-
-        if res is None:
-            logger.warning("\n")
-            logger.warning("**************************************************************************************")
-            logger.warning("** WARNING: The BPE pre-tokenizer was not recognized!")
-            logger.warning("**          There are 2 possible reasons for this:")
-            logger.warning("**          - the model has not been added to convert-hf-to-gguf-update.py yet")
-            logger.warning("**          - the pre-tokenization config has changed upstream")
-            logger.warning("**          Check your model files and convert-hf-to-gguf-update.py and update them accordingly.")
-            logger.warning("** ref:     https://github.com/ggerganov/llama.cpp/pull/6920")
-            logger.warning("**")
-            logger.warning(f"** chkhsh:  {chkhsh}")
-            logger.warning("**************************************************************************************")
-            logger.warning("\n")
-            raise NotImplementedError("BPE pre-tokenizer was not recognized - update get_vocab_base_pre()")
-
-        logger.debug(f"tokenizer.ggml.pre: {repr(res)}")
-        logger.debug(f"chkhsh: {chkhsh}")
-
-        return res
+        logger.warning("\n")
+        logger.warning("**************************************************************************************")
+        logger.warning("** WARNING: The BPE pre-tokenizer was not recognized!")
+        logger.warning("**          There are 2 possible reasons for this:")
+        logger.warning("**          - the model has not been added to convert-hf-to-gguf-update.py yet")
+        logger.warning("**          - the pre-tokenization config has changed upstream")
+        logger.warning("**          Check your model files and convert-hf-to-gguf-update.py and update them accordingly.")
+        logger.warning("** ref:     https://github.com/ggerganov/llama.cpp/pull/6920")
+        logger.warning("**")
+        logger.warning(f"** tokenizer checksum:  {checksum}")
+        logger.warning("**************************************************************************************")
+        logger.warning("\n")
+        raise NotImplementedError("BPE pre-tokenizer was not recognized - update get_vocab_base_pre()")
         # Marker: End get_vocab_base_pre
 
     def _set_vocab_gpt2(self) -> None:
@@ -579,22 +527,22 @@ class Model:
 
         tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
-        toktypes: list[int] = [SentencePieceTokenTypes.UNKNOWN] * vocab_size
+        toktypes: list[int] = [gguf.TokenType.UNKNOWN] * vocab_size
 
         for token_id in range(tokenizer.vocab_size()):
             piece = tokenizer.IdToPiece(token_id)
             text = piece.encode("utf-8")
             score = tokenizer.GetScore(token_id)
 
-            toktype = SentencePieceTokenTypes.NORMAL
+            toktype = gguf.TokenType.NORMAL
             if tokenizer.IsUnknown(token_id):
-                toktype = SentencePieceTokenTypes.UNKNOWN
+                toktype = gguf.TokenType.UNKNOWN
             elif tokenizer.IsControl(token_id):
-                toktype = SentencePieceTokenTypes.CONTROL
+                toktype = gguf.TokenType.CONTROL
             elif tokenizer.IsUnused(token_id):
-                toktype = SentencePieceTokenTypes.UNUSED
+                toktype = gguf.TokenType.UNUSED
             elif tokenizer.IsByte(token_id):
-                toktype = SentencePieceTokenTypes.BYTE
+                toktype = gguf.TokenType.BYTE
 
             tokens[token_id] = text
             scores[token_id] = score
@@ -612,7 +560,7 @@ class Model:
 
                     tokens[token_id] = key.encode("utf-8")
                     scores[token_id] = -1000.0
-                    toktypes[token_id] = SentencePieceTokenTypes.USER_DEFINED
+                    toktypes[token_id] = gguf.TokenType.USER_DEFINED
 
         if vocab_size > len(tokens):
             pad_count = vocab_size - len(tokens)
@@ -620,7 +568,7 @@ class Model:
             for i in range(1, pad_count + 1):
                 tokens.append(bytes(f"[PAD{i}]", encoding="utf-8"))
                 scores.append(-1000.0)
-                toktypes.append(SentencePieceTokenTypes.UNUSED)
+                toktypes.append(gguf.TokenType.UNUSED)
 
         self.gguf_writer.add_tokenizer_model("llama")
         self.gguf_writer.add_tokenizer_pre("default")
@@ -1753,7 +1701,7 @@ class Phi3MiniModel(Model):
 
         tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
-        toktypes: list[int] = [SentencePieceTokenTypes.UNKNOWN] * vocab_size
+        toktypes: list[int] = [gguf.TokenType.UNKNOWN] * vocab_size
 
         for token_id in range(tokenizer.vocab_size()):
 
@@ -1761,15 +1709,15 @@ class Phi3MiniModel(Model):
             text = piece.encode("utf-8")
             score = tokenizer.GetScore(token_id)
 
-            toktype = SentencePieceTokenTypes.NORMAL
+            toktype = gguf.TokenType.NORMAL
             if tokenizer.IsUnknown(token_id):
-                toktype = SentencePieceTokenTypes.UNKNOWN
+                toktype = gguf.TokenType.UNKNOWN
             elif tokenizer.IsControl(token_id):
-                toktype = SentencePieceTokenTypes.CONTROL
+                toktype = gguf.TokenType.CONTROL
             elif tokenizer.IsUnused(token_id):
-                toktype = SentencePieceTokenTypes.UNUSED
+                toktype = gguf.TokenType.UNUSED
             elif tokenizer.IsByte(token_id):
-                toktype = SentencePieceTokenTypes.BYTE
+                toktype = gguf.TokenType.BYTE
 
             tokens[token_id] = text
             scores[token_id] = score
@@ -1788,7 +1736,7 @@ class Phi3MiniModel(Model):
 
                     tokens[token_id] = key.encode("utf-8")
                     scores[token_id] = -1000.0
-                    toktypes[token_id] = SentencePieceTokenTypes.USER_DEFINED
+                    toktypes[token_id] = gguf.TokenType.USER_DEFINED
 
         tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
         if tokenizer_config_file.is_file():
@@ -1798,13 +1746,13 @@ class Phi3MiniModel(Model):
                 for token_id, foken_data in added_tokens_decoder.items():
                     token_id = int(token_id)
                     token = foken_data["content"].encode("utf-8")
-                    if toktypes[token_id] != SentencePieceTokenTypes.UNKNOWN:
+                    if toktypes[token_id] != gguf.TokenType.UNKNOWN:
                         assert tokens[token_id] == token
                     tokens[token_id] = token
                     scores[token_id] = -1000.0
-                    toktypes[token_id] = SentencePieceTokenTypes.USER_DEFINED
+                    toktypes[token_id] = gguf.TokenType.USER_DEFINED
                     if foken_data.get("special"):
-                        toktypes[token_id] = SentencePieceTokenTypes.CONTROL
+                        toktypes[token_id] = gguf.TokenType.CONTROL
 
         tokenizer_file = self.dir_model / 'tokenizer.json'
         if tokenizer_file.is_file():
@@ -1814,13 +1762,13 @@ class Phi3MiniModel(Model):
                 for foken_data in added_tokens:
                     token_id = int(foken_data["id"])
                     token = foken_data["content"].encode("utf-8")
-                    if toktypes[token_id] != SentencePieceTokenTypes.UNKNOWN:
+                    if toktypes[token_id] != gguf.TokenType.UNKNOWN:
                         assert tokens[token_id] == token
                     tokens[token_id] = token
                     scores[token_id] = -1000.0
-                    toktypes[token_id] = SentencePieceTokenTypes.USER_DEFINED
+                    toktypes[token_id] = gguf.TokenType.USER_DEFINED
                     if foken_data.get("special"):
-                        toktypes[token_id] = SentencePieceTokenTypes.CONTROL
+                        toktypes[token_id] = gguf.TokenType.CONTROL
 
         self.gguf_writer.add_tokenizer_model("llama")
         self.gguf_writer.add_tokenizer_pre("default")
@@ -2015,15 +1963,15 @@ class InternLM2Model(Model):
                 logger.warning(f"InternLM2 convert token '{text}' to '🐉'!")
                 text = "🐉".encode("utf-8")
 
-            toktype = SentencePieceTokenTypes.NORMAL
+            toktype = gguf.TokenType.NORMAL
             if tokenizer.IsUnknown(token_id):
-                toktype = SentencePieceTokenTypes.UNKNOWN
+                toktype = gguf.TokenType.UNKNOWN
             elif tokenizer.IsControl(token_id):
-                toktype = SentencePieceTokenTypes.CONTROL
+                toktype = gguf.TokenType.CONTROL
             elif tokenizer.IsUnused(token_id):
-                toktype = SentencePieceTokenTypes.UNUSED
+                toktype = gguf.TokenType.UNUSED
             elif tokenizer.IsByte(token_id):
-                toktype = SentencePieceTokenTypes.BYTE
+                toktype = gguf.TokenType.BYTE
 
             tokens.append(text)
             scores.append(score)
@@ -2037,7 +1985,7 @@ class InternLM2Model(Model):
                 for key in added_tokens_json:
                     tokens.append(key.encode("utf-8"))
                     scores.append(-1000.0)
-                    toktypes.append(SentencePieceTokenTypes.USER_DEFINED)
+                    toktypes.append(gguf.TokenType.USER_DEFINED)
 
         self.gguf_writer.add_tokenizer_model("llama")
         self.gguf_writer.add_tokenizer_pre("default")
@@ -2502,7 +2450,7 @@ class ArcticModel(Model):
 
         tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
-        toktypes: list[int] = [SentencePieceTokenTypes.UNKNOWN] * vocab_size
+        toktypes: list[int] = [gguf.TokenType.UNKNOWN] * vocab_size
 
         for token_id in range(tokenizer.vocab_size()):
 
@@ -2510,15 +2458,15 @@ class ArcticModel(Model):
             text = piece.encode("utf-8")
             score = tokenizer.GetScore(token_id)
 
-            toktype = SentencePieceTokenTypes.NORMAL
+            toktype = gguf.TokenType.NORMAL
             if tokenizer.IsUnknown(token_id):
-                toktype = SentencePieceTokenTypes.UNKNOWN
+                toktype = gguf.TokenType.UNKNOWN
             elif tokenizer.IsControl(token_id):
-                toktype = SentencePieceTokenTypes.CONTROL
+                toktype = gguf.TokenType.CONTROL
             elif tokenizer.IsUnused(token_id):
-                toktype = SentencePieceTokenTypes.UNUSED
+                toktype = gguf.TokenType.UNUSED
             elif tokenizer.IsByte(token_id):
-                toktype = SentencePieceTokenTypes.BYTE
+                toktype = gguf.TokenType.BYTE
 
             tokens[token_id] = text
             scores[token_id] = score
@@ -2540,16 +2488,16 @@ class ArcticModel(Model):
                             continue
 
                         token_content = token_json["content"]
-                        token_type = SentencePieceTokenTypes.USER_DEFINED
+                        token_type = gguf.TokenType.USER_DEFINED
                         token_score = -10000.0
 
                         # Map unk_token to UNKNOWN, other special tokens to CONTROL
                         # Set the score to 0.0 as in the original tokenizer.model
                         if ("special" in token_json) and token_json["special"]:
                             if token_content == tokenizer_config_json["unk_token"]:
-                                token_type = SentencePieceTokenTypes.UNKNOWN
+                                token_type = gguf.TokenType.UNKNOWN
                             else:
-                                token_type = SentencePieceTokenTypes.CONTROL
+                                token_type = gguf.TokenType.CONTROL
                             token_score = 0.0
 
                         logger.info(f"Setting added token {token_id} to '{token_content}' (type: {token_type}, score: {token_score:.2f})")
