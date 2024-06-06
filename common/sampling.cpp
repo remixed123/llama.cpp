@@ -66,7 +66,7 @@ std::string llama_token_healing_rollback(
     // and stop early if a special token is encountered
     while (removed < max_to_remove) {
         const llama_token next_token_id = tokens[n_ctx - removed - 1];
-        if (llama_token_get_type(model, next_token_id) != LLAMA_TOKEN_TYPE_NORMAL) {
+        if (llama_token_is_control(model, next_token_id) || llama_token_is_eog(model, next_token_id)) {
             // Don't roll back e.g. <|endoftext|> (if parse_special=true in llama_tokenize)
             break;
         }
