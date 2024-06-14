@@ -22881,7 +22881,6 @@ int ggml_cpu_has_neon(void) {
 int ggml_cpu_has_sve(void) {
 #if defined(__ARM_FEATURE_SVE)
     // TODO: Currently, SVE 256 bit is only supported.
-    GGML_ASSERT(svcntb() == QK8_0);
     return 1;
 #else
     return 0;
