@@ -402,10 +402,6 @@ if (LLAMA_AARCH64)
     set(GGML_SOURCES_AARCH64 ggml-aarch64.c)
 endif()
 
-if (LLAMA_QKK_64)
-    add_compile_definitions(GGML_QKK_64)
-endif()
-
 if (LLAMA_CUBLAS)
     message(WARNING "LLAMA_CUBLAS is deprecated and will be removed in the future.\nUse LLAMA_CUDA instead")
     set(LLAMA_CUDA ON)
