@@ -173,6 +173,24 @@ struct do_unpack : std::integral_constant<bool,
     std::is_same<T, block_q4_0>::value ||
     std::is_same<T, block_q4_1>::value> {};
 
+#define GGML_DISPATCH_FLOATING_TYPES(TYPE, ...)                                \
+  [&] {                                                                        \
+    switch (TYPE) {                                                            \
+      case GGML_TYPE_F16: {                                                    \
+        using type = ggml_fp16_t;                                              \
+        constexpr int blck_size = 16;                                          \
+        return __VA_ARGS__();                                                  \
+      }                                                                        \
+      case GGML_TYPE_BF16: {                                                   \
+        using type = ggml_bf16_t;                                              \
+        constexpr int blck_size = 32;                                          \
+        return __VA_ARGS__();                                                  \
+      }                                                                        \
+      default:                                                                 \
+        fprintf(stderr, "Unsupported floating data type\n");                   \
+    }                                                                          \
+  }()
+
 #define GGML_DISPATCH_QTYPES(QT, ...)                                          \
   [&] {                                                                        \
     switch (QT) {                                                              \
@@ -554,6 +572,68 @@ struct acc_C<block_q8_0, block_q8_0, is_acc> {
     }
   }
 };
+
+template <typename TA, typename TB, typename TC, int BLOCK_M, int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_avx {
+  static void apply(int K, const TA * RESTRICT A, const TB * RESTRICT B, TC * RESTRICT C, int ldc) {
+    GGML_UNUSED(K);
+    GGML_UNUSED(A);
+    GGML_UNUSED(B);
+    GGML_UNUSED(C);
+    GGML_UNUSED(ldc);
+  }
+};
+
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
+struct tinygemm_kernel_avx<float, ggml_fp16_t, float, BLOCK_M, BLOCK_N, BLOCK_K> {
+  static void apply(int K, const float * RESTRICT A, const ggml_fp16_t * RESTRICT B, float * RESTRICT C, int ldc) {
+    constexpr int ROWS = BLOCK_M;
+    constexpr int COLS = BLOCK_N;
+    assert(BLOCK_K == 16);
+
+    __m512 va;
+    __m512 vb[COLS];
+    __m512 vc[ROWS * COLS];
+
+    auto loadc = [&](int idx) {
+      vc[idx] = _mm512_setzero_ps();
+    };
+    Unroll<ROWS * COLS>{}(loadc);
+
+    auto compute = [&](int idx, int k) {
+      // TODO: use `constexpr` here to get rid of interger div
+      // when upgraded to C++17
+      const int row = idx / COLS;
+      const int col = idx % COLS;
+
+      if (col == 0) {
+        va = _mm512_loadu_ps(A + row * K + k);
+      }
+      if (row == 0) {
+        vb[col] =  _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i *)(B + col * K + k)));
+      }
+      vc[idx] = _mm512_fmadd_ps(va, vb[col], vc[idx]);
+    };
+
+    for (int k = 0; k < K; k += 16) {
+      Unroll<ROWS * COLS>{}(compute, k);
+    }
+
+    auto storec = [&](int idx) {
+      const int row = idx / COLS;
+      const int col = idx % COLS;
+      C[row * ldc + col] = _mm512_reduce_add_ps(vc[idx]);
+    };
+    Unroll<ROWS * COLS>{}(storec);
+  }
+};
+
+#define LAUNCH_TINYGEMM_KERNEL_AVX(MB_SIZE, NB_SIZE)                              \
+  tinygemm_kernel_avx<float, type, float, MB_SIZE, NB_SIZE, blck_size>::apply(    \
+      K, (const float *)src1->data + mb_start * K,                                \
+      (const type *)src0->data + nb_start * K,                                    \
+      (float *)dst->data + mb_start * ldc + nb_start, ldc);
+
 
 // re-organize in the format {NB, KB, TILE_SIZE}:
 #define PACKED_INDEX(n, k, KB, tile_size) (n * KB + k) * tile_size
@@ -995,10 +1075,11 @@ bool ggml_compute_forward_mul_mat_use_amx(struct ggml_tensor * dst) {
   const enum ggml_type type = src0->type;
   const int64_t ne0 = dst->ne[0];
 
-  // amx kernels enables for Q4_0, Q4_1
+  // amx kernels enables for Q4_0, Q4_1, Q8_0, F16
   bool has_amx_kernels = (type == GGML_TYPE_Q4_0) ||
       (type == GGML_TYPE_Q4_1) ||
-      (type == GGML_TYPE_Q8_0);
+      (type == GGML_TYPE_Q8_0) ||
+      (type == GGML_TYPE_F16);
 
   // handle only 2d gemm for now
   auto is_contiguous_2d = [](const struct ggml_tensor * t) {
@@ -1028,6 +1109,10 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
   const enum ggml_type TYPE = src0->type;
 
+  // f16 only has avx512 kernels for now,
+  // amx kernels will be added once 6th gen xeon is released.
+  const bool is_floating_type = TYPE == GGML_TYPE_F16;
+
   const int ith = params->ith;
   const int nth = params->nth;
 
@@ -1041,6 +1126,10 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
 
   if (params->type == GGML_TASK_TYPE_INIT) {
     if (ith != 0) {
+      return;
+    }
+
+    if (is_floating_type) {
       return;
     }
 
@@ -1066,6 +1155,44 @@ void ggml_mul_mat_amx(const struct ggml_compute_params * params, struct ggml_ten
   }
 
   if (params->type == GGML_TASK_TYPE_FINALIZE) {
+    return;
+  }
+
+  if (is_floating_type) {
+    constexpr int BLOCK_M = 4;
+    constexpr int BLOCK_N = 6;
+    const int MB = div_up(M, BLOCK_M);
+    const int NB = div_up(N, BLOCK_N);
+
+    parallel_for(nth, ith, MB * NB, [&](int begin, int end) {
+      GGML_DISPATCH_FLOATING_TYPES(TYPE, [&] {
+        for (int i = begin; i < end; ++i) {
+          int mb = i / NB;
+          int nb = i % NB;
+
+          int mb_start = mb * BLOCK_M;
+          int mb_size = std::min(BLOCK_M, M - mb_start);
+          int nb_start = nb * BLOCK_N;
+          int nb_size = std::min(BLOCK_N, N - nb_start);
+
+          switch (mb_size << 4 | nb_size) {
+            case 0x12: LAUNCH_TINYGEMM_KERNEL_AVX(1, 2); break;
+            case 0x14: LAUNCH_TINYGEMM_KERNEL_AVX(1, 4); break;
+            case 0x16: LAUNCH_TINYGEMM_KERNEL_AVX(1, 6); break;
+            case 0x22: LAUNCH_TINYGEMM_KERNEL_AVX(2, 2); break;
+            case 0x24: LAUNCH_TINYGEMM_KERNEL_AVX(2, 4); break;
+            case 0x26: LAUNCH_TINYGEMM_KERNEL_AVX(2, 6); break;
+            case 0x32: LAUNCH_TINYGEMM_KERNEL_AVX(3, 2); break;
+            case 0x34: LAUNCH_TINYGEMM_KERNEL_AVX(3, 4); break;
+            case 0x36: LAUNCH_TINYGEMM_KERNEL_AVX(3, 6); break;
+            case 0x42: LAUNCH_TINYGEMM_KERNEL_AVX(4, 2); break;
+            case 0x44: LAUNCH_TINYGEMM_KERNEL_AVX(4, 4); break;
+            case 0x46: LAUNCH_TINYGEMM_KERNEL_AVX(4, 6); break;
+            default: fprintf(stderr, "Unexpected block size!\n");
+          }
+        }
+      });
+    });
     return;
   }
 
