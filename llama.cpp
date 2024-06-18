@@ -4870,8 +4870,8 @@ static void llm_load_vocab(
                     tokenizer_pre == "jina-v2-de" ||
                     tokenizer_pre == "jina-v2-code") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_GPT2;
-            } else if (
-                    tokenizer_pre == "refact") {
+
+            } else if (tokenizer_pre == "refact") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_REFACT;
             } else if (
                 tokenizer_pre == "command-r") {
@@ -4894,6 +4894,9 @@ static void llm_load_vocab(
             } else if (
                 tokenizer_pre == "poro-chat") {
                 vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_PORO;
+            } else if (
+                tokenizer_pre == "jina-v2-zh") {
+                vocab.type_pre = LLAMA_VOCAB_PRE_TYPE_JINA_V2_ZH;
             } else {
                 throw std::runtime_error(format("unknown pre-tokenizer type: '%s'", tokenizer_pre.c_str()));
             }
@@ -4925,8 +4928,7 @@ static void llm_load_vocab(
 
     for (uint32_t i = 0; i < n_vocab; i++) {
         std::string word = gguf_get_arr_str(ctx, token_idx, i);
-        GGML_ASSERT(unicode_cpts_from_utf8(word).size() > 0);
-
+        //GGML_ASSERT(unicode_cpts_from_utf8(word).size() > 0); Remove check, some vocabs contain by mistake the NULL in vocab, (not ideal if it happens more than once) (jinaai-embeddings-v2-base-zh)
         vocab.token_to_id[word] = i;
 
         auto & token_data = vocab.id_to_token[i];
@@ -4999,9 +5001,18 @@ static void llm_load_vocab(
     } else if (vocab.type == LLAMA_VOCAB_TYPE_WPM) {
         vocab.linefeed_id = vocab.special_pad_id;
     } else {
-        const std::vector<int> ids = llama_tokenize_internal(vocab, "\xC4\x8A", false); // U+010A
-        GGML_ASSERT(!ids.empty() && "model vocab missing newline token");
-        vocab.linefeed_id = ids[0];
+        try {
+            const std::vector<int> ids = llama_tokenize_internal(vocab, "\xC4\x8A", false); // U+010A
+            if (ids.empty()) {
+                LLAMA_LOG_WARN("%s: %s vocabulary, but newline token not found: %s! Using special_pad_id instead.", __func__, llama_model_vocab_type_name(vocab.type), "\xC4\x8A");
+                vocab.linefeed_id = -1;
+            } else {
+                vocab.linefeed_id = ids[0];
+            }
+        } catch (const std::exception & e) {
+            LLAMA_LOG_WARN("%s: %s vocabulary, but newline token not found: %s! Using special_pad_id instead.", __func__, llama_model_vocab_type_name(vocab.type), e.what());
+            vocab.linefeed_id = vocab.special_pad_id;
+        }
     }
 
     // special tokens
@@ -13248,6 +13259,19 @@ struct llm_tokenizer_bpe {
                         word_collection = unicode_regex_split(text, {
                             " ?[^(\\s|.,!?…。，、।۔،)]+",
                         });
+                        break;
+                    case LLAMA_VOCAB_PRE_TYPE_JINA_V2_ZH:
+                        //Apply lowercase + whitespace pretokenization
+                        {
+                            std::string lowercase_text = lowercase(text);
+                            std::regex regexPattern("\\w+|[^\\w\\s]+");
+                            std::sregex_token_iterator it(lowercase_text.begin(), lowercase_text.end(), regexPattern);
+                            std::sregex_token_iterator end;
+
+                            while (it != end) {
+                                word_collection.push_back(*it++);
+                            }
+                        }
                         break;
                     default:
                         // default regex for BPE tokenization pre-processing
