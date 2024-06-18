@@ -646,7 +646,7 @@ ggml-metal-embed.o: ggml-metal.metal ggml-common.h
 endif
 endif # LLAMA_METAL
 
-OBJS += ggml-alloc.o ggml-backend.o ggml-quants.o unicode.o unicode-data.o
+OBJS += ggml-alloc.o ggml-backend.o ggml-quants.o unicode.o unicode-data.o ggml-aarch64.o
 COMMON_H_DEPS = common/common.h common/sampling.h common/log.h llama.h
 COMMON_DEPS   = common.o sampling.o grammar-parser.o build-info.o json-schema-to-grammar.o
 
@@ -747,8 +747,6 @@ unicode.o: unicode.cpp unicode.h
 
 unicode-data.o: unicode-data.cpp unicode-data.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-OBJS += ggml-alloc.o ggml-backend.o ggml-quants.o unicode.o unicode-data.o ggml-aarch64.o
 
 llama.o: llama.cpp unicode.h ggml.h ggml-alloc.h ggml-backend.h ggml-cuda.h ggml-metal.h llama.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
