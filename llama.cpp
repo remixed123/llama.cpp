@@ -15156,7 +15156,7 @@ void llama_backend_free(void) {
 #if defined(GGML_USE_MPI)
     ggml_mpi_backend_free();
 #elif defined(GGML_USE_CANN)
-    ggml_cann_backend_init();
+    ggml_cann_backend_free();
 #endif
     ggml_quantize_free();
 }
