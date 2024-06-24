@@ -53,11 +53,7 @@ static constexpr __device__ int get_mmq_x_max_device() {
 
 static constexpr __device__ int get_mmq_y_device() {
 #if defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
-#if defined(RDNA1)
-    return 32;
-#else
     return 128;
-#endif // defined(RDNA1)
 #else
 #if __CUDA_ARCH__ >= CC_VOLTA
     return 128;
