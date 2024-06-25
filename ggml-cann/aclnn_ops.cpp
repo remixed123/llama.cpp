@@ -2211,24 +2211,19 @@ void ggml_cann_rope(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                dst);
     
     // init cos/sin cache, 
-    // TODO: use multi kernel
     void* sin_buffer = ctx.alloc_buffer(dst, src0->ne[0] * src0->ne[2] 
                                              * sizeof(float_t));
     void* cos_buffer = ctx.alloc_buffer(dst, src0->ne[0] * src0->ne[2] 
                                              * sizeof(float_t));
 
-    try {
-        GGML_ASSERT(param.input_ne[0]==128);
-        aclrtlaunch_ascendc_rope_init_cache(param.position_ne[0], ctx.stream(), 
-                                            position_cast_buffer, 
-                                            sin_buffer, cos_buffer, param_buffer);
-        ACL_CHECK(aclrtFree(param_buffer));
-    }
-    catch (...) {
-        for (int i=0; i<4; i++) {
-            printf("ne%d: %d, %d \n", i, param.input_ne[i], param.position_ne[i]);
-        }
-    }
+
+    ggml_tensor*  src_extra = (ggml_tensor*)src0->extra;
+    aclrtlaunch_ascendc_rope_init_cache(param.position_ne[0], ctx.stream(), 
+                                        position_cast_buffer, 
+                                        sin_buffer, cos_buffer,
+                                        param_buffer,
+                                        ((ggml_tensor*)src0->extra)->ne);
+    ACL_CHECK(aclrtFree(param_buffer));
 
     // reshape sin&cos
     // TODO: ne[3] != 0
