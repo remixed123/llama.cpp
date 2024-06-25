@@ -1891,6 +1891,36 @@ inline static void ggml_vec_silu_backward_f32(const int n, float * dx, const flo
 }
 #endif
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
+
+// adapted from arm limited optimized routine
+// the maximum error is 1.45358 plus 0.5 ulps
+// numbers above 88.38 will flush to infinity
+// numbers beneath -103.97 will flush to zero
+inline static float32x4_t ggml_v_expf(float32x4_t x) {
+    const float32x4_t r = vdupq_n_f32(0x1.8p23f);
+    const float32x4_t z = vfmaq_f32(r, x, vdupq_n_f32(0x1.715476p+0f));
+    const float32x4_t n = vsubq_f32(z, r);
+    const float32x4_t b = vfmsq_f32(vfmsq_f32(x, n, vdupq_n_f32(0x1.62e4p-1f)), n,
+                                    vdupq_n_f32(0x1.7f7d1cp-20f));
+    const uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_f32(z), 23);
+    const float32x4_t k = vreinterpretq_f32_u32(vaddq_u32(e, vreinterpretq_u32_f32(vdupq_n_f32(1))));
+    const uint32x4_t c = vcagtq_f32(n, vdupq_n_f32(126));
+    const float32x4_t u = vmulq_f32(b, b);
+    const float32x4_t j = vfmaq_f32(
+        vmulq_f32(vdupq_n_f32(0x1.ffffecp-1f), b),
+        vfmaq_f32(vfmaq_f32(vdupq_n_f32(0x1.fffdb6p-2f), vdupq_n_f32(0x1.555e66p-3f), b),
+                  vfmaq_f32(vdupq_n_f32(0x1.573e2ep-5f), vdupq_n_f32(0x1.0e4020p-7f), b), u), u);
+    if (!vpaddd_u64(vreinterpretq_u64_u32(c)))
+        return vfmaq_f32(k, j, k);
+    const uint32x4_t d = vandq_u32(vclezq_f32(n), vdupq_n_u32(0x82000000));
+    const float32x4_t s1 = vreinterpretq_f32_u32(vaddq_u32(d, vdupq_n_u32(0x7f000000)));
+    const float32x4_t s2 = vreinterpretq_f32_u32(vsubq_u32(e, d));
+    return vbslq_f32(vcagtq_f32(n, vdupq_n_f32(192)), vmulq_f32(s1, s1),
+                     vbslq_f32(c, vmulq_f32(vfmaq_f32(s2, s2, j), s1), vfmaq_f32(k, k, j)));
+}
+#endif
+
 inline static void ggml_vec_sum_f32(const int n, float * s, const float * x) {
 #ifndef GGML_USE_ACCELERATE
     ggml_float sum = 0.0;
@@ -2377,6 +2407,60 @@ void ggml_numa_init(enum ggml_numa_strategy numa_flag) {
 
 bool ggml_is_numa(void) {
     return g_state.numa.n_nodes > 1;
+}
+
+
+static ggml_float ggml_vec_soft_max_f32(const int n, float * y, const float * x, float max) {
+    int i = 0;
+    ggml_float sum = 0;
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+    for (; i + 15 < n; i += 16) {
+        __m512 val = ggml_v_expf(_mm512_sub_ps(_mm512_loadu_ps(x + i),
+                                               _mm512_set1_ps(max)));
+        _mm512_storeu_ps(y + i, val);
+        sum += (ggml_float)_mm512_reduce_add_ps(val);
+    }
+#elif defined(__AVX2__) && defined(__FMA__)
+    for (; i + 7 < n; i += 8) {
+        __m256 val = ggml_v_expf(_mm256_sub_ps(_mm256_loadu_ps(x + i),
+                                               _mm256_set1_ps(max)));
+        _mm256_storeu_ps(y + i, val);
+        __m128 val2 = _mm_add_ps(_mm256_extractf128_ps(val, 1),
+                                 _mm256_castps256_ps128(val));
+        val2 = _mm_add_ps(val2, _mm_movehl_ps(val2, val2));
+        val2 = _mm_add_ss(val2, _mm_movehdup_ps(val2));
+        sum += (ggml_float)_mm_cvtss_f32(val2);
+    }
+#elif defined(__SSE2__)
+    for (; i + 3 < n; i += 4) {
+        __m128 val = ggml_v_expf(_mm_sub_ps(_mm_loadu_ps(x + i),
+                                            _mm_set1_ps(max)));
+        _mm_storeu_ps(y + i, val);
+#if defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__)
+        val = _mm_add_ps(val, _mm_movehl_ps(val, val));
+        val = _mm_add_ss(val, _mm_movehdup_ps(val));
+#else
+        __m128 tmp = _mm_shuffle_ps(val, val, _MM_SHUFFLE(2, 3, 0, 1));
+        val = _mm_add_ps(val, tmp);
+        tmp = _mm_movehl_ps(tmp, val);
+        val = _mm_add_ss(val, tmp);
+#endif
+        sum += (ggml_float)_mm_cvtss_f32(val);
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    for (; i + 3 < n; i += 4) {
+        float32x4_t val = ggml_v_expf(vsubq_f32(vld1q_f32(x + i),
+                                                vdupq_n_f32(max)));
+        vst1q_f32(y + i, val);
+        sum += (ggml_float)vaddvq_f32(val);
+    }
+#endif
+    for (; i < n; ++i) {
+        float val = expf(x[i] - max);
+        sum += (ggml_float)val;
+        y[i] = val;
+    }
+    return sum;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -5402,26 +5486,21 @@ static struct ggml_tensor * ggml_soft_max_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * mask,
-        struct ggml_tensor  * pos,
         float                 scale,
         float                 max_bias,
         bool                  inplace) {
     GGML_ASSERT(ggml_is_contiguous(a));
 
     if (mask) {
+        GGML_ASSERT(mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32);
         GGML_ASSERT(ggml_is_contiguous(mask));
         GGML_ASSERT(ggml_is_matrix(mask));
-        GGML_ASSERT(ggml_can_repeat_rows(mask, a));
-    }
-
-    if (pos) {
-        GGML_ASSERT(ggml_is_vector(pos));
-        GGML_ASSERT(pos->type == GGML_TYPE_F32);
-        GGML_ASSERT(pos->ne[0] == a->ne[0]);
+        GGML_ASSERT(mask->ne[0] == a->ne[0]);
+        GGML_ASSERT(mask->ne[1] >= a->ne[1]);
     }
 
     if (max_bias > 0.0f) {
-        GGML_ASSERT(pos);
+        GGML_ASSERT(mask);
     }
 
     bool is_node = false;
@@ -5439,7 +5518,6 @@ static struct ggml_tensor * ggml_soft_max_impl(
     result->grad = is_node ? ggml_dup_tensor(ctx, result) : NULL;
     result->src[0] = a;
     result->src[1] = mask;
-    result->src[2] = pos;
 
     return result;
 }
@@ -5447,23 +5525,22 @@ static struct ggml_tensor * ggml_soft_max_impl(
 struct ggml_tensor * ggml_soft_max(
         struct ggml_context * ctx,
         struct ggml_tensor  * a) {
-    return ggml_soft_max_impl(ctx, a, NULL, NULL, 1.0f, 0.0f, false);
+    return ggml_soft_max_impl(ctx, a, NULL, 1.0f, 0.0f, false);
 }
 
 struct ggml_tensor * ggml_soft_max_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor  * a) {
-    return ggml_soft_max_impl(ctx, a, NULL, NULL, 1.0f, 0.0f, true);
+    return ggml_soft_max_impl(ctx, a, NULL, 1.0f, 0.0f, true);
 }
 
 struct ggml_tensor * ggml_soft_max_ext(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * mask,
-        struct ggml_tensor  * pos,
         float                 scale,
         float                 max_bias) {
-    return ggml_soft_max_impl(ctx, a, mask, pos, scale, max_bias, false);
+    return ggml_soft_max_impl(ctx, a, mask, scale, max_bias, false);
 }
 
 // ggml_soft_max_back
@@ -12245,14 +12322,9 @@ static void ggml_compute_forward_soft_max_f32(
 
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
-    const struct ggml_tensor * src2 = dst->src[2];
 
     assert(ggml_is_contiguous(dst));
     assert(ggml_are_same_shape(src0, dst));
-
-    if (params->type == GGML_TASK_TYPE_INIT || params->type == GGML_TASK_TYPE_FINALIZE) {
-        return;
-    }
 
     float scale    = 1.0f;
     float max_bias = 0.0f;
@@ -12267,12 +12339,12 @@ static void ggml_compute_forward_soft_max_f32(
 
     GGML_TENSOR_UNARY_OP_LOCALS
 
-    const int64_t ne11 = src1 ? src1->ne[1] : 1;
+    //const int64_t ne11 = src1 ? src1->ne[1] : 1;
 
     // TODO: is this supposed to be ceil instead of floor?
     //       https://huggingface.co/mosaicml/mpt-7b/blob/main/attention.py#L370
-    const uint32_t n_head_kv   = ne02;
-    const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head_kv));
+    const uint32_t n_head      = ne02;
+    const uint32_t n_head_log2 = 1u << (uint32_t) floor(log2(n_head));
 
     const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
     const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
@@ -12289,29 +12361,31 @@ static void ggml_compute_forward_soft_max_f32(
 
     float * wp = (float *) params->wdata + (nc + CACHE_LINE_SIZE_F32) * ith;
 
-    // when max_bias <= 0.0f, src2 is not used and we default it to src0 to avoid branching
-    float * pos = src2 ? (float *) src2->data : src0->data;
+    const bool use_f16 = (src1 && src1->type == GGML_TYPE_F16);
 
     for (int i1 = ir0; i1 < ir1; i1++) {
+        // ALiBi
+        const uint32_t h = (i1/ne01)%ne02; // head
+        const float slope = (max_bias > 0.0f) ? h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1) : 1.0f;
+
         float * sp = (float *)((char *) src0->data + i1*src0->nb[1]);
         float * dp = (float *)((char *)  dst->data +  i1*dst->nb[1]);
 
         // broadcast the mask across rows
-        float * mp = src1 ? (float *)((char *) src1->data + (i1%ne11)*src1->nb[1]) : NULL;
+        ggml_fp16_t * mp_f16 = src1 ? (ggml_fp16_t *)((char *) src1->data) + (i1%ne01)*ne00 : NULL;
+        float       * mp_f32 = src1 ? (float       *)((char *) src1->data) + (i1%ne01)*ne00 : NULL;
 
         ggml_vec_cpy_f32  (nc, wp, sp);
         ggml_vec_scale_f32(nc, wp, scale);
-        if (mp) {
-            ggml_vec_acc_f32(nc, wp, mp);
-        }
-
-        // ALiBi bias
-        if (max_bias > 0.0f) {
-            const uint32_t h  = (i1/ne01)%ne02; // head
-            const float slope = h < n_head_log2 ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1);
-
-            for (int i = 0; i < nc; i++) {
-                wp[i] = wp[i] + slope*pos[i];
+        if (mp_f32) {
+            if (use_f16) {
+                for (int i = 0; i < nc; ++i) {
+                    wp[i] += slope*GGML_FP16_TO_FP32(mp_f16[i]);
+                }
+            } else {
+                for (int i = 0; i < nc; ++i) {
+                    wp[i] += slope*mp_f32[i];
+                }
             }
         }
 
@@ -12325,22 +12399,7 @@ static void ggml_compute_forward_soft_max_f32(
         float max = -INFINITY;
         ggml_vec_max_f32(nc, &max, wp);
 
-        ggml_float sum = 0.0;
-
-        uint16_t scvt;
-        for (int i = 0; i < nc; i++) {
-            if (wp[i] == -INFINITY) {
-                dp[i] = 0.0f;
-            } else {
-                // const float val = (wp[i] == -INFINITY) ? 0.0 : exp(wp[i] - max);
-                ggml_fp16_t s = GGML_FP32_TO_FP16(wp[i] - max);
-                memcpy(&scvt, &s, sizeof(scvt));
-                const float val = GGML_FP16_TO_FP32(ggml_table_exp_f16[scvt]);
-                sum += (ggml_float)val;
-                dp[i] = val;
-            }
-        }
-
+        ggml_float sum = ggml_vec_soft_max_f32(nc, dp, wp, max);
         assert(sum > 0.0);
 
         sum = 1.0/sum;
@@ -12372,6 +12431,7 @@ static void ggml_compute_forward_soft_max(
             } break;
     }
 }
+
 
 // ggml_compute_forward_soft_max_back
 

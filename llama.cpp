@@ -6433,7 +6433,7 @@ static struct ggml_tensor * llm_build_kqv(
     } else
 #endif
     {
-        kq = ggml_soft_max_ext(ctx, kq, kq_mask, kq_pos, kq_scale, hparams.f_max_alibi_bias);
+        kq = ggml_soft_max_ext(ctx, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
         cb(kq, "kq_soft_max_ext", il);
     }
 
@@ -8060,7 +8060,7 @@ struct llm_build_context {
             struct ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
             cb(kq, "kq", il);
 
-            kq = ggml_soft_max_ext(ctx0, kq, KQ_mask, nullptr, 1.0f/sqrtf(float(n_embd_head)), hparams.f_max_alibi_bias);
+            kq = ggml_soft_max_ext(ctx0, kq, KQ_mask, 1.0f/sqrtf(float(n_embd_head)), hparams.f_max_alibi_bias);
             cb(kq, "kq_soft_max_ext", il);
 
             struct ggml_tensor * v = ggml_cont(ctx0, ggml_transpose(ctx0, ggml_reshape_2d(ctx0, Vcur, n_embd_gqa, n_tokens)));

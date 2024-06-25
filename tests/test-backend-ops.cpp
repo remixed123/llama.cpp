@@ -1098,34 +1098,38 @@ struct test_diag_mask_inf : public test_case {
 
 // GGML_OP_SOFT_MAX
 struct test_soft_max : public test_case {
-    const ggml_type type;
+    const ggml_type type_src;
+    const ggml_type type_mask;
     const std::array<int64_t, 4> ne;
     const bool mask;
     const float scale;
     const float max_bias;
 
     std::string vars() override {
-        return VARS_TO_STR5(type, ne, mask, scale, max_bias);
+        return VARS_TO_STR6(type_src, type_mask, ne, mask, scale, max_bias);
     }
 
-    test_soft_max(ggml_type type = GGML_TYPE_F32,
-            std::array<int64_t, 4> ne = {10, 10, 10, 10},
-            bool mask = false,
-            float scale = 1.0f,
-            float max_bias = 0.0f)
-        : type(type), ne(ne), mask(mask), scale(scale), max_bias(max_bias) {}
+    // the 1024 test with bias occasionally fails:
+    // SOFT_MAX(type=f32,ne=[1024,16,1,1],mask=1,scale=1.000000,max_bias=8.000000): [SOFT_MAX] NMSE = 0.000000103 > 0.000000100 FAIL
+    virtual double max_nmse_err() override {
+        return 1e-6;
+    }
+
+    test_soft_max(ggml_type type_src = GGML_TYPE_F32, 
+                  ggml_type type_mask = GGML_TYPE_F32,
+                  std::array<int64_t, 4> ne = {10, 10, 10, 10},
+                  bool mask = false,
+                  float scale = 1.0f,
+                  float max_bias = 0.0f)
+        : type_src(type_src),  type_mask(type_mask), ne(ne), mask(mask), scale(scale), max_bias(max_bias) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * a = ggml_new_tensor(ctx, type, 4, ne.data());
+        ggml_tensor * a = ggml_new_tensor(ctx, type_src, 4, ne.data());
         ggml_tensor * mask = nullptr;
         if (this->mask) {
-            mask = ggml_new_tensor_2d(ctx, type, ne[0], ne[1]);
+            mask = ggml_new_tensor_2d(ctx, type_mask, ne[0], ne[1]);
         }
-        ggml_tensor * pos = nullptr;
-        if (max_bias > 0.0f) {
-            pos = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, ne[0]);
-        }
-        ggml_tensor * out = ggml_soft_max_ext(ctx, a, mask, pos, scale, max_bias);
+        ggml_tensor * out = ggml_soft_max_ext(ctx, a, mask, scale, max_bias);
         return out;
     }
 };
@@ -1618,7 +1622,7 @@ public:
 
         struct ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
 
-        kq = ggml_soft_max_ext(ctx, kq, kq_mask, nullptr, kq_scale, 0.0f);
+        kq = ggml_soft_max_ext(ctx, kq, kq_mask, kq_scale, 0.0f);
 
         // split cached v into n_head heads
         struct ggml_tensor * v =
@@ -2139,7 +2143,7 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
         for (int n = 0; n < 10; ++n) {
             int64_t ne0 = dist_ne0(rng);
             int64_t ne1 = dist_ne1(rng);
-            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {ne0, ne1, 1, 1}, n/2 == 0, 0.1f, ne0 < 1000 ? 4.0f : 0.0f));
+            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F32, {ne0, ne1, 1, 1}, n/2 == 0, 0.1f, ne0 < 1000 ? 4.0f : 0.0f));
         }
 
         exponent <<= 1;
@@ -2147,21 +2151,24 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
 #endif
     for (bool mask : {false, true}) {
         for (float max_bias : {0.0f, 8.0f}) {
+            if (!mask && max_bias > 0.0f) continue;
             for (float scale : {1.0f, 0.1f}) {
                 for (int64_t ne0 : {16, 1024}) {
                     for (int64_t ne1 : {16, 1024}) {
-                        test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {ne0, ne1, 1, 1}, mask, scale, max_bias));
-                        test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {ne0-1, ne1-1, 1, 1}, mask, scale, max_bias));
+                        for (ggml_type mask_type: {GGML_TYPE_F32, GGML_TYPE_F16}) {
+                            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, mask_type, {ne0,   ne1,   1, 1}, mask, scale, max_bias));
+                            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, mask_type, {ne0-1, ne1-1, 1, 1}, mask, scale, max_bias));
+                        }
                     }
                 }
             }
         }
     }
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F16, {16, 2, 32, 1}, true, 0.1f, 0.0f));
 
-    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {16, 2, 32, 1}, false, 0.1f, 0.0f));
-    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 0.0f));
-    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {16, 2, 32, 1}, false, 0.1f, 8.0f));
-    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 8.0f));
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F32, {16, 2, 32, 1}, false, 0.1f, 0.0f));
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 0.0f));
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 8.0f));
 
     for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16}) {
         test_cases.emplace_back(new test_rope(type, {128,  32, 10, 1}, 128, 0, 512)); // llama 7B
