@@ -45,6 +45,9 @@
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
 #define LLAMA_STATE_SEQ_VERSION 1
 
+#define die(msg)          do { fputs("error: " msg "\n", stderr);                exit(1); } while (0)
+#define die_fmt(fmt, ...) do { fprintf(stderr, "error: " fmt "\n", __VA_ARGS__); exit(1); } while (0)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -292,6 +295,7 @@ extern "C" {
         uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
         uint32_t n_threads;         // number of threads to use for generation
         uint32_t n_threads_batch;   // number of threads to use for batch processing
+        char hot_lora[256];    // path to the hot lora file
 
         enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
         enum llama_pooling_type      pooling_type;      // whether to pool (sum) embedding results by sequence id
