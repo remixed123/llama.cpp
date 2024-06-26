@@ -2259,9 +2259,9 @@ static __device__ void mul_mat_q_process_tile(
 
 template <ggml_type type, int mmq_x, int nwarps, bool need_check>
 #if defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
-#if defined(RDNA3) || defined(RDNA2)
+#if defined(RDNA3) || defined(RDNA2) || defined(RDNA1)
     __launch_bounds__(WARP_SIZE*nwarps, 2)
-#endif // defined(RDNA3) || defined(RDNA2)
+#endif // defined(RDNA3) || defined(RDNA2) || defined(RDNA1)
 #else
 #if __CUDA_ARCH__ >= CC_VOLTA
     __launch_bounds__(WARP_SIZE*nwarps, 1)
