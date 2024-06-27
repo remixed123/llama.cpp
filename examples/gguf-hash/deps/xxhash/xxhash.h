@@ -1688,7 +1688,11 @@ struct XXH64_state_s {
 #ifndef XXH_NO_XXH3
 
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) /* >= C11 */
+/* This check is a workaround for missing stdalign.h found in https://github.com/deepmind/mujoco/issues/862 */
+/* Once users stop using Windows SDK under 10.0.22000 we can drop this check */
+#if (_MSC_VER >= 1000)
 #  include <stdalign.h>
+#endif
 #  define XXH_ALIGN(n)      alignas(n)
 #elif defined(__cplusplus) && (__cplusplus >= 201103L) /* >= C++11 */
 /* In C++ alignas() is a keyword */
