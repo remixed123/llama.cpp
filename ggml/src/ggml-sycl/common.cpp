@@ -140,7 +140,7 @@ void ggml_backend_sycl_print_sycl_devices() {
     }
 
     std::map<std::string, size_t> DeviceNums2;
-    fprintf(stderr, "Part2:\n");
+    fprintf(stderr, "\nPart2:\n");
     fprintf(stderr, "|ID|Max compute units|Max work group|Max subgroup|                    Driver version|\n");
     fprintf(stderr, "|--|-----------------|--------------|------------|----------------------------------|\n");
     for (int id = 0; id < device_count; ++id) {
