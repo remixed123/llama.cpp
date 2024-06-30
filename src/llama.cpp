@@ -29,6 +29,10 @@
 #  include "ggml-metal.h"
 #endif
 
+#ifdef LLAMA_NVAPI
+#  include "nvapi.h"
+#endif
+
 // TODO: replace with ggml API call
 #define QK_K 256
 
@@ -17309,6 +17313,11 @@ void llama_backend_init(void) {
         struct ggml_context * ctx = ggml_init(params);
         ggml_free(ctx);
     }
+
+#ifdef LLAMA_NVAPI
+    // initalize NVAPI library
+    nvapi_init();
+#endif
 }
 
 void llama_numa_init(enum ggml_numa_strategy numa) {
@@ -17319,6 +17328,11 @@ void llama_numa_init(enum ggml_numa_strategy numa) {
 
 void llama_backend_free(void) {
     ggml_quantize_free();
+
+#ifdef LLAMA_NVAPI
+    // free NVAPI library
+    nvapi_free();
+#endif
 }
 
 int64_t llama_time_us(void) {
