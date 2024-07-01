@@ -59,6 +59,8 @@ llama-batched-swift
 /rpc-server
 out/
 tmp/
+ggml-vulkan-shaders.hpp
+ggml-vulkan-shaders.cpp
 
 # CI
 
